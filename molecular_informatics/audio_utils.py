@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import io
-from typing import Iterable, List, Sequence, Tuple
+from typing import Iterable, List, Sequence, Tuple, Union
 
 import numpy as np
 
 SPEED_OF_LIGHT = 2.99792458e10  # cm/s
+AudioComponent = Tuple[float, float]
 
 
 def wavenumber_to_frequency_cm1(wavenumber: float) -> float:
@@ -30,7 +31,7 @@ def map_wavenumber_to_audible(
 
 
 def generate_waveform(
-    frequencies: Sequence[float],
+    frequencies: Sequence[Union[float, AudioComponent]],
     duration: float = 2.0,
     sample_rate: int = 44100,
     envelope: str = "hann",
@@ -39,8 +40,12 @@ def generate_waveform(
 
     t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
     waveform = np.zeros_like(t)
-    for freq in frequencies:
-        waveform += np.sin(2 * np.pi * freq * t)
+    for component in frequencies:
+        if isinstance(component, tuple):
+            freq, amplitude = component
+        else:
+            freq, amplitude = component, 1.0
+        waveform += amplitude * np.sin(2 * np.pi * freq * t)
 
     if envelope == "hann":
         window = np.hanning(len(t))
@@ -63,14 +68,18 @@ def waveform_to_wav_bytes(waveform: np.ndarray, sample_rate: int = 44100) -> byt
     return buffer.getvalue()
 
 
-def groups_to_audio_frequencies(matches: Iterable) -> List[float]:
-    """Convert functional group matches to audible frequencies."""
+def groups_to_audio_components(matches: Iterable) -> List[AudioComponent]:
+    """Convert functional group matches to (frequency, amplitude) components."""
 
-    freqs: List[float] = []
-    for match in matches:
-        if not getattr(match, "present", False):
-            continue
+    components: List[AudioComponent] = []
+    filtered = [m for m in matches if getattr(m, "present", False)]
+    total_occurrences = sum(getattr(m, "match_count", 0) for m in filtered)
+    if total_occurrences == 0:
+        return components
+
+    for match in filtered:
         center = match.group.center_wavenumber
         audio_freq = map_wavenumber_to_audible(center)
-        freqs.append(audio_freq)
-    return freqs
+        weight = match.match_count / total_occurrences if total_occurrences else 0.0
+        components.append((audio_freq, weight))
+    return components
