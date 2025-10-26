@@ -2,57 +2,25 @@
 from __future__ import annotations
 
 import json
-from typing import Dict, List
+from typing import List
 
 import pandas as pd
 import streamlit as st
 
-from molecular_informatics import audio_utils, chem_utils, reaction_ui
+from molecular_informatics import audio_utils, chem_utils
 
+try:
+    from streamlit_ketcher import st_ketcher
+except ImportError:  # pragma: no cover - optional dependency
+    st_ketcher = None  # type: ignore[assignment]
 
-def parse_multiline(text: str) -> List[str]:
-    return [line.strip() for line in text.splitlines() if line.strip()]
-
-
-def resolve_molecules(queries: List[str], label: str) -> List[chem_utils.MoleculeInfo]:
-    infos: List[chem_utils.MoleculeInfo] = []
-    for query in queries:
-        try:
-            infos.append(chem_utils.resolve_molecule(query))
-        except chem_utils.MoleculeResolutionError as exc:
-            st.error(f"{label} '{query}': {exc}")
-            st.stop()
-    if not infos:
-        st.error(f"Please provide at least one {label.lower()}.")
-        st.stop()
-    return infos
-def render_sidebar() -> Dict[str, object]:
+def render_sidebar():
     st.sidebar.title("Configuration")
-    mode = st.sidebar.radio("Mode", ("Single molecule", "Reaction"))
     duration = st.sidebar.slider("Audio duration (s)", 1.0, 10.0, 4.0, 0.5)
     sample_rate = st.sidebar.select_slider(
         "Sample rate", options=[22050, 32000, 44100], value=44100
     )
-
-    if mode == "Single molecule":
-        st.sidebar.write("Enter a SMILES string.")
-        query = st.sidebar.text_input("Molecule", "CCO")
-        return {
-            "mode": "single",
-            "query": query,
-            "duration": duration,
-            "sample_rate": sample_rate,
-        }
-
-    st.sidebar.write("Provide SMILES strings for reactants and products (one per line).")
-    reactants_text = st.sidebar.text_area(
-        "Reactants", "CO\nCC(=O)O", height=96
-    )
-    products_text = st.sidebar.text_area("Products", "COC(=O)C\nO", height=96)
     return {
-        "mode": "reaction",
-        "reactants_text": reactants_text,
-        "products_text": products_text,
         "duration": duration,
         "sample_rate": sample_rate,
     }
@@ -139,6 +107,22 @@ def render_audio_section(
         "Add or remove functional groups to reshape the sonic palette."
         " Try adjusting the duration to hear sustained harmonics."
     )
+def render_ketcher_editor(initial_smiles: str, *, key: str):
+    """Render the Ketcher drawing widget when available."""
+    if st_ketcher is None:
+        st.info(
+            "Install `streamlit-ketcher` to enable the interactive drawing tool."
+            " Falling back to manual SMILES entry."
+        )
+        return None
+
+    try:
+        return st_ketcher(value=initial_smiles, key=key)
+    except Exception as exc:  # pragma: no cover - defensive
+        st.warning(f"Unable to render Ketcher editor: {exc}")
+        return None
+
+
 def main():
     st.set_page_config(page_title="Molecular FTIR Sound Generator", layout="wide")
     st.title("Molecular FTIR Sound Generator")
@@ -151,54 +135,40 @@ def main():
     duration = inputs["duration"]
     sample_rate = inputs["sample_rate"]
 
-    if inputs["mode"] == "single":
-        query = inputs["query"]
-        if not query:
-            st.stop()
+    if "smiles_input" not in st.session_state:
+        st.session_state["smiles_input"] = "CCO"
+    if "smiles_input_pending" in st.session_state:
+        st.session_state["smiles_input"] = st.session_state.pop("smiles_input_pending")
 
-        try:
-            info = chem_utils.resolve_molecule(query)
-        except chem_utils.MoleculeResolutionError as exc:
-            st.error(str(exc))
-            st.stop()
+    st.subheader("Molecule input")
+    st.text_input("SMILES string", key="smiles_input")
+    st.caption("Paste a SMILES string or draw the molecule below to generate audio.")
 
-        render_molecule_info(info)
-
-        matches = chem_utils.find_functional_groups(info.mol)
-        render_ftir_table(matches)
-        render_audio_section(matches, duration, sample_rate)
-        return
-
-    reactant_queries = parse_multiline(inputs["reactants_text"])
-    product_queries = parse_multiline(inputs["products_text"])
-
-    reactant_infos = resolve_molecules(reactant_queries, "Reactant")
-    product_infos = resolve_molecules(product_queries, "Product")
-
-    reaction_ui.render_molecule_summary("Reactants", reactant_queries, reactant_infos)
-    reaction_ui.render_molecule_summary("Products", product_queries, product_infos)
-
-    reactant_match_sets = [
-        chem_utils.find_functional_groups(info.mol) for info in reactant_infos
-    ]
-    product_match_sets = [
-        chem_utils.find_functional_groups(info.mol) for info in product_infos
-    ]
-    reactant_matches = chem_utils.aggregate_group_matches(reactant_match_sets)
-    product_matches = chem_utils.aggregate_group_matches(product_match_sets)
-    deltas = chem_utils.compute_group_deltas(reactant_matches, product_matches)
-
-    render_ftir_table(reactant_matches, heading="Reactant FTIR features")
-    render_audio_section(
-        reactant_matches, duration, sample_rate, heading="Reactant soundscape"
+    drawn_smiles = render_ketcher_editor(
+        st.session_state["smiles_input"], key="ketcher_editor"
     )
+    if isinstance(drawn_smiles, str):
+        updated_smiles = drawn_smiles.strip()
+        if updated_smiles and updated_smiles != st.session_state["smiles_input"]:
+            st.session_state["smiles_input_pending"] = updated_smiles
+            st.rerun()
 
-    render_ftir_table(product_matches, heading="Product FTIR features")
-    render_audio_section(
-        product_matches, duration, sample_rate, heading="Product soundscape"
-    )
+    query = st.session_state["smiles_input"].strip()
+    if not query:
+        st.info("Enter a SMILES string or use the drawing tool to begin.")
+        st.stop()
 
-    reaction_ui.render_reaction_changes(deltas, duration, sample_rate)
+    try:
+        info = chem_utils.resolve_molecule(query)
+    except chem_utils.MoleculeResolutionError as exc:
+        st.error(str(exc))
+        st.stop()
+
+    render_molecule_info(info)
+
+    matches = chem_utils.find_functional_groups(info.mol)
+    render_ftir_table(matches)
+    render_audio_section(matches, duration, sample_rate)
 
 
 if __name__ == "__main__":
