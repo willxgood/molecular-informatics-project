@@ -108,6 +108,13 @@ FUNCTIONAL_GROUPS: List[FunctionalGroup] = [
         notes="Primary and secondary amine N-H stretches.",
     ),
     FunctionalGroup(
+        name="Aliphatic C-N stretch",
+        smarts="[CX4]-[NX3;!$(NC=O)]",
+        wavenumber_range=(1020, 1250),
+        intensity="medium",
+        notes="C-N stretching band common to aliphatic amines.",
+    ),
+    FunctionalGroup(
         name="Ether C-O stretch",
         smarts="C-O-C",
         wavenumber_range=(1050, 1150),
@@ -127,6 +134,13 @@ FUNCTIONAL_GROUPS: List[FunctionalGroup] = [
         wavenumber_range=(1620, 1680),
         intensity="medium",
         notes="Stretching vibrations of alkenes.",
+    ),
+    FunctionalGroup(
+        name="Imine C=N stretch",
+        smarts="[CX3]=[NX2]",
+        wavenumber_range=(1640, 1690),
+        intensity="medium",
+        notes="Characteristic C=N stretch observed for imines and Schiff bases.",
     ),
     FunctionalGroup(
         name="Thiol S-H stretch",

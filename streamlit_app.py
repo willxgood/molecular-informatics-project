@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from typing import List
+from typing import List, Optional
 
 import pandas as pd
 import streamlit as st
@@ -67,6 +67,7 @@ def render_audio_section(
     duration: float,
     sample_rate: int,
     heading: str = "Molecular soundscape",
+    molecule_info: Optional[chem_utils.MoleculeInfo] = None,
 ):
     st.subheader(heading)
     present_matches = [m for m in matches if m.present]
@@ -90,8 +91,208 @@ def render_audio_section(
     )
     st.dataframe(freq_table, hide_index=True)
 
+    medicinal_profile: Optional[audio_utils.MedicinalSoundProfile] = None
+
+    with st.expander("Medicinal chemistry sound design", expanded=False):
+        auto_enabled = st.checkbox(
+            "Auto apply PubChem sound design",
+            value=False,
+            help="When enabled, tries to infer activity, selectivity, toxicity, and bioavailability from PubChem annotations.",
+        )
+
+        manual_controls_needed = True
+        if auto_enabled:
+            if chem_utils.requests is None:
+                st.warning("Install the 'requests' package to enable PubChem integration.")
+            elif molecule_info is None:
+                st.info("Resolve a molecule first to enable automatic sound design.")
+            else:
+                cid_resolved = molecule_info.pubchem_cid is not None
+                if not cid_resolved:
+                    with st.spinner("Resolving PubChem CID from SMILES..."):
+                        cid = chem_utils.lookup_pubchem_cid(molecule_info.smiles)
+                    if cid is not None:
+                        molecule_info.pubchem_cid = cid
+                        cid_resolved = True
+                    else:
+                        st.info(
+                            "Unable to resolve a PubChem CID from the supplied SMILES. Try a recognised compound name or toggle the controls manually."
+                        )
+                if cid_resolved:
+                    with st.spinner("Fetching PubChem medicinal annotations..."):
+                        summary = chem_utils.fetch_pubchem_medicinal_summary(molecule_info.pubchem_cid)
+                    if summary and summary.has_data():
+                        def fmt_intensity(value: Optional[float]) -> str:
+                            if value is None:
+                                return "—"
+                            return f"{value * 100:.0f}%"
+
+                        def fmt_evidence(value: Optional[str]) -> str:
+                            return value if value else "—"
+
+                        medicinal_profile = audio_utils.MedicinalSoundProfile(
+                            activity=summary.activity,
+                            activity_strength=summary.activity_strength,
+                            selectivity=summary.selectivity,
+                            selectivity_strength=summary.selectivity_strength,
+                            toxicity=summary.toxicity,
+                            toxicity_strength=summary.toxicity_strength,
+                            bioavailability=summary.bioavailability,
+                            bioavailability_strength=summary.bioavailability_strength,
+                        )
+                        effects_table = []
+                        if summary.activity:
+                            effects_table.append(
+                                {
+                                    "Cue": "Activity",
+                                    "Status": summary.activity,
+                                    "Intensity (%)": fmt_intensity(summary.activity_strength),
+                                    "Evidence": fmt_evidence(summary.activity_evidence),
+                                }
+                            )
+                        if summary.selectivity:
+                            effects_table.append(
+                                {
+                                    "Cue": "Selectivity",
+                                    "Status": summary.selectivity,
+                                    "Intensity (%)": fmt_intensity(summary.selectivity_strength),
+                                    "Evidence": fmt_evidence(summary.selectivity_evidence),
+                                }
+                            )
+                        if summary.toxicity:
+                            effects_table.append(
+                                {
+                                    "Cue": "Toxicity",
+                                    "Status": summary.toxicity,
+                                    "Intensity (%)": fmt_intensity(summary.toxicity_strength),
+                                    "Evidence": fmt_evidence(summary.toxicity_evidence),
+                                }
+                            )
+                        if summary.bioavailability:
+                            effects_table.append(
+                                {
+                                    "Cue": "Bioavailability",
+                                    "Status": summary.bioavailability,
+                                    "Intensity (%)": fmt_intensity(summary.bioavailability_strength),
+                                    "Evidence": fmt_evidence(summary.bioavailability_evidence),
+                                }
+                            )
+                        if effects_table:
+                            manual_controls_needed = False
+                            st.markdown("**PubChem sound design cues**")
+                            st.dataframe(pd.DataFrame(effects_table), hide_index=True)
+                        else:
+                            st.info(
+                                "PubChem returned pharmacological data, but no clear activity, selectivity, toxicity, or bioavailability cues were detected."
+                            )
+                    else:
+                        st.info(
+                            "PubChem returned no medicinal annotations for this compound."
+                        )
+
+        if manual_controls_needed:
+            activity_choice = st.selectbox(
+                "Activity profile",
+                options=["Off", "Active", "Inactive"],
+                index=0,
+                help="Active compounds sound stronger, inactive ones are muted.",
+            )
+            selectivity_enabled = st.toggle(
+                "Selective polish",
+                value=False,
+                help="Selective profiles get a cleaner rendering.",
+            )
+            toxicity_enabled = st.toggle(
+                "Toxic distortion",
+                value=False,
+                help="Introduce a distorted edge for toxic liabilities.",
+            )
+            bioavailability_enabled = st.toggle(
+                "Bioavailable smoothing",
+                value=False,
+                help="Smooth out the waveform to represent bioavailable compounds.",
+            )
+            manual_effects = []
+            activity_value: Optional[str] = None
+            activity_strength: Optional[float] = None
+            if activity_choice == "Active":
+                activity_value = "active"
+                activity_strength = 1.0
+                manual_effects.append(
+                    {
+                        "Cue": "Activity",
+                        "Status": "active",
+                        "Intensity (%)": "100%",
+                        "Evidence": "Manual selection",
+                    }
+                )
+            elif activity_choice == "Inactive":
+                activity_value = "inactive"
+                activity_strength = 1.0
+                manual_effects.append(
+                    {
+                        "Cue": "Activity",
+                        "Status": "inactive",
+                        "Intensity (%)": "100%",
+                        "Evidence": "Manual selection",
+                    }
+                )
+            selectivity_value = "selective" if selectivity_enabled else None
+            selectivity_strength = 1.0 if selectivity_enabled else None
+            if selectivity_enabled:
+                manual_effects.append(
+                    {
+                        "Cue": "Selectivity",
+                        "Status": "selective",
+                        "Intensity (%)": "100%",
+                        "Evidence": "Manual selection",
+                    }
+                )
+            toxicity_value = "toxic" if toxicity_enabled else None
+            toxicity_strength = 1.0 if toxicity_enabled else None
+            if toxicity_enabled:
+                manual_effects.append(
+                    {
+                        "Cue": "Toxicity",
+                        "Status": "toxic",
+                        "Intensity (%)": "100%",
+                        "Evidence": "Manual selection",
+                    }
+                )
+            bioavailability_value = "bioavailable" if bioavailability_enabled else None
+            bioavailability_strength = 1.0 if bioavailability_enabled else None
+            if bioavailability_enabled:
+                manual_effects.append(
+                    {
+                        "Cue": "Bioavailability",
+                        "Status": "bioavailable",
+                        "Intensity (%)": "100%",
+                        "Evidence": "Manual selection",
+                    }
+                )
+            medicinal_profile = audio_utils.MedicinalSoundProfile(
+                activity=activity_value,
+                activity_strength=activity_strength,
+                selectivity=selectivity_value,
+                selectivity_strength=selectivity_strength,
+                toxicity=toxicity_value,
+                toxicity_strength=toxicity_strength,
+                bioavailability=bioavailability_value,
+                bioavailability_strength=bioavailability_strength,
+            )
+            if manual_effects:
+                st.markdown("**Manual sound design cues**")
+                st.dataframe(pd.DataFrame(manual_effects), hide_index=True)
+
+    profile_arg = None
+    if medicinal_profile and not medicinal_profile.is_neutral():
+        profile_arg = medicinal_profile
+
     waveform = audio_utils.generate_waveform(
-        components, duration=duration, sample_rate=sample_rate
+        components,
+        duration=duration,
+        sample_rate=sample_rate,
+        medicinal_profile=profile_arg,
     )
     audio_bytes = audio_utils.waveform_to_wav_bytes(waveform, sample_rate=sample_rate)
     st.audio(audio_bytes, format="audio/wav")
@@ -107,6 +308,8 @@ def render_audio_section(
         "Add or remove functional groups to reshape the sonic palette."
         " Try adjusting the duration to hear sustained harmonics."
     )
+
+
 def render_ketcher_editor(initial_smiles: str, *, key: str):
     """Render the Ketcher drawing widget when available."""
     if st_ketcher is None:
@@ -168,7 +371,7 @@ def main():
 
     matches = chem_utils.find_functional_groups(info.mol)
     render_ftir_table(matches)
-    render_audio_section(matches, duration, sample_rate)
+    render_audio_section(matches, duration, sample_rate, molecule_info=info)
 
 
 if __name__ == "__main__":
