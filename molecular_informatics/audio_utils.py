@@ -30,6 +30,51 @@ def map_wavenumber_to_audible(
     return audio_min + scale * (audio_max - audio_min)
 
 
+def _wrap_frequency_to_band(
+    frequency: float,
+    low: float = 110.0,
+    high: float = 880.0,
+) -> float:
+    """Move ``frequency`` into ``[low, high]`` by octave shifts (powers of two)."""
+
+    if frequency <= 0:
+        return frequency
+    wrapped = float(frequency)
+    while wrapped < low:
+        wrapped *= 2.0
+    while wrapped > high:
+        wrapped /= 2.0
+    return wrapped
+
+
+def _combine_nearby_components(
+    components: Sequence[AudioComponent],
+    *,
+    tolerance_hz: float = 12.0,
+) -> List[AudioComponent]:
+    """Average components that sit within ``tolerance_hz`` of each other."""
+
+    if not components:
+        return []
+
+    sorted_components = sorted(components, key=lambda item: item[0])
+    merged: List[AudioComponent] = []
+    current_freq, current_amp = sorted_components[0]
+
+    for freq, amp in sorted_components[1:]:
+        if abs(freq - current_freq) <= tolerance_hz:
+            total_amp = current_amp + amp
+            if total_amp > 0:
+                current_freq = (current_freq * current_amp + freq * amp) / total_amp
+            current_amp = total_amp
+        else:
+            merged.append((current_freq, current_amp))
+            current_freq, current_amp = freq, amp
+
+    merged.append((current_freq, current_amp))
+    return merged
+
+
 def _oscillator(
     t: np.ndarray,
     frequency: float,
@@ -232,6 +277,12 @@ def groups_to_audio_components(matches: Iterable) -> List[AudioComponent]:
     for match in filtered:
         center = match.group.center_wavenumber
         audio_freq = map_wavenumber_to_audible(center)
+        audio_freq = _wrap_frequency_to_band(audio_freq)
         weight = match.match_count / total_occurrences if total_occurrences else 0.0
         components.append((audio_freq, weight))
-    return components
+
+    smoothed = _combine_nearby_components(components)
+    total_weight = sum(weight for _, weight in smoothed)
+    if total_weight > 0:
+        smoothed = [(freq, weight / total_weight) for freq, weight in smoothed]
+    return smoothed

@@ -62,11 +62,9 @@ def _default_track_payload(
         "delay_seconds": None,
         "delay_feedback": 0.3,
         "delay_mix": 0.25,
-        "drive": 0.0,
         "reverb_wet": 0.0,
         "reverb_size": 0.4,
         "reverb_decay": 0.6,
-        "clarity_amount": 0.0,
         "track_volume": 1.0,
         "note_mode": "harmonic",
         "note_name": "C4",
@@ -521,12 +519,13 @@ def _render_track_editor(track: Dict[str, Any], *, sample_rate: int) -> Dict[str
                 key=f"track_lp_enable_{track['id']}",
             )
             if enable_lowpass:
+                default_lp = float(track.get("lowpass_cutoff") or min(sample_rate // 2, 2000))
                 track["lowpass_cutoff"] = float(
                     st.slider(
                         "Low-pass cutoff (Hz)",
                         min_value=200.0,
                         max_value=float(sample_rate // 2),
-                        value=float(track.get("lowpass_cutoff", min(sample_rate // 2, 2000))),
+                        value=default_lp,
                         step=50.0,
                         key=f"track_lp_cutoff_{track['id']}",
                     )
@@ -573,17 +572,6 @@ def _render_track_editor(track: Dict[str, Any], *, sample_rate: int) -> Dict[str
             else:
                 track["delay_seconds"] = None
 
-            track["drive"] = float(
-                st.slider(
-                    "Saturation drive",
-                    min_value=0.0,
-                    max_value=1.0,
-                    value=float(track.get("drive", 0.0)),
-                    step=0.05,
-                    key=f"track_drive_{track['id']}",
-                )
-            )
-
             enable_reverb = st.checkbox(
                 "Enable reverb",
                 value=track.get("reverb_wet", 0.0) > 0,
@@ -622,18 +610,6 @@ def _render_track_editor(track: Dict[str, Any], *, sample_rate: int) -> Dict[str
                 )
             else:
                 track["reverb_wet"] = 0.0
-
-            track["clarity_amount"] = float(
-                st.slider(
-                    "Clarity boost",
-                    min_value=0.0,
-                    max_value=1.0,
-                    value=float(track.get("clarity_amount", 0.0)),
-                    step=0.05,
-                    key=f"track_clarity_{track['id']}",
-                    help="Enhances upper harmonics and removes low-end rumble for added definition.",
-                )
-            )
 
     return actions
 

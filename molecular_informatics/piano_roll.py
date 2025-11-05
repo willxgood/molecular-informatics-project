@@ -365,11 +365,9 @@ def render_track_audio(
             "delay_seconds": track.get("delay_seconds"),
             "delay_feedback": track.get("delay_feedback"),
             "delay_mix": track.get("delay_mix"),
-            "drive": track.get("drive"),
             "reverb_wet": track.get("reverb_wet"),
             "reverb_size": track.get("reverb_size"),
             "reverb_decay": track.get("reverb_decay"),
-            "clarity_amount": track.get("clarity_amount"),
         },
     )
 

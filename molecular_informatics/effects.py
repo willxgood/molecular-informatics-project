@@ -95,19 +95,6 @@ def apply_delay(
     return ((1 - mix) * output + mix * delayed).astype(np.float32)
 
 
-def apply_distortion(waveform: np.ndarray, *, drive: float = 1.0) -> np.ndarray:
-    """Apply a tanh-based waveshaper with configurable ``drive``."""
-
-    drive = max(drive, 0.0)
-    if drive == 0:
-        return waveform
-    shaped = np.tanh(waveform * (1.0 + drive * 9.0))
-    max_amp = np.max(np.abs(shaped))
-    if max_amp > 0:
-        shaped = shaped / max_amp
-    return shaped.astype(np.float32)
-
-
 def apply_reverb(
     waveform: np.ndarray,
     *,
@@ -147,49 +134,6 @@ def apply_reverb(
     return ((1 - wet) * waveform + wet * convolved).astype(np.float32)
 
 
-def apply_presence_enhancer(
-    waveform: np.ndarray,
-    *,
-    sample_rate: int,
-    amount: float = 0.3,
-    air_cutoff: float = 2800.0,
-    clean_cutoff: float = 120.0,
-) -> np.ndarray:
-    """Boost upper harmonics while taming rumble to add clarity."""
-
-    amount = max(0.0, min(1.0, amount))
-    if amount == 0.0:
-        return waveform
-
-    working = waveform.astype(np.float32)
-
-    try:
-        low_part = apply_lowpass_filter(
-            working,
-            sample_rate=sample_rate,
-            cutoff=air_cutoff,
-            order=4,
-        )
-    except ValueError:
-        low_part = np.copy(working)
-
-    high_band = working - low_part
-    enhanced = working + amount * high_band
-
-    if clean_cutoff:
-        try:
-            enhanced = apply_highpass_filter(
-                enhanced,
-                sample_rate=sample_rate,
-                cutoff=clean_cutoff,
-                order=2,
-            )
-        except ValueError:
-            pass
-
-    return normalise_audio(enhanced)
-
-
 def normalise_audio(waveform: np.ndarray) -> np.ndarray:
     """Return ``waveform`` scaled to avoid clipping."""
 
@@ -205,7 +149,7 @@ def apply_effect_chain(
     sample_rate: int,
     settings: Optional[Dict[str, Union[float, None]]] = None,
 ) -> np.ndarray:
-    """Apply gain, filtering, delay, distortion, and reverb in sequence."""
+    """Apply gain, filtering, delay, and reverb in sequence."""
 
     processed = waveform.astype(np.float32)
     settings = settings or {}
@@ -240,10 +184,6 @@ def apply_effect_chain(
             mix=float(settings.get("delay_mix", 0.25) or 0.25),
         )
 
-    drive = settings.get("drive")
-    if drive:
-        processed = apply_distortion(processed, drive=float(drive))
-
     reverb_wet = settings.get("reverb_wet")
     if reverb_wet:
         processed = apply_reverb(
@@ -252,14 +192,6 @@ def apply_effect_chain(
             wet=float(reverb_wet),
             room_size=float(settings.get("reverb_size", 0.4) or 0.4),
             decay=float(settings.get("reverb_decay", 0.6) or 0.6),
-        )
-
-    clarity_amount = settings.get("clarity_amount")
-    if clarity_amount:
-        processed = apply_presence_enhancer(
-            processed,
-            sample_rate=sample_rate,
-            amount=float(clarity_amount),
         )
 
     return normalise_audio(processed)
