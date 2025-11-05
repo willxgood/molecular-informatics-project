@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 import json
-from typing import List
+from typing import Dict, List
 
 import pandas as pd
 import streamlit as st
 
-from molecular_informatics import audio_utils, chem_utils
+from molecular_informatics import audio_utils, chem_utils, piano_roll_ui
 
 try:
     from streamlit_ketcher import st_ketcher
@@ -73,7 +73,7 @@ def render_audio_section(
     components = audio_utils.groups_to_audio_components(present_matches)
     if not components:
         st.info("No functional groups detected for audio synthesis.")
-        return
+        return None
 
     st.markdown(
         "The following audible frequencies are linearly mapped from the"
@@ -107,6 +107,13 @@ def render_audio_section(
         "Add or remove functional groups to reshape the sonic palette."
         " Try adjusting the duration to hear sustained harmonics."
     )
+    return {
+        "components": components,
+        "waveform": waveform,
+        "audio_bytes": audio_bytes,
+        "matches": present_matches,
+    }
+
 def render_ketcher_editor(initial_smiles: str, *, key: str):
     """Render the Ketcher drawing widget when available."""
     if st_ketcher is None:
@@ -168,7 +175,14 @@ def main():
 
     matches = chem_utils.find_functional_groups(info.mol)
     render_ftir_table(matches)
-    render_audio_section(matches, duration, sample_rate)
+    audio_context = render_audio_section(matches, duration, sample_rate)
+    if audio_context is not None:
+        piano_roll_ui.render_piano_roll_section(
+            info=info,
+            components=audio_context["components"],
+            duration=duration,
+            sample_rate=sample_rate,
+        )
 
 
 if __name__ == "__main__":

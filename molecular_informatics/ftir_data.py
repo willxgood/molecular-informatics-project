@@ -87,6 +87,13 @@ FUNCTIONAL_GROUPS: List[FunctionalGroup] = [
         notes="Amide I band from peptide backbone carbonyl stretch.",
     ),
     FunctionalGroup(
+        name="Imine C=N stretch",
+        smarts="C=N",
+        wavenumber_range=(1640, 1690),
+        intensity="medium",
+        notes="C=N stretch observed in imines and Schiff bases.",
+    ),
+    FunctionalGroup(
         name="Nitrile C≡N stretch",
         smarts="C#N",
         wavenumber_range=(2210, 2260),
@@ -106,6 +113,13 @@ FUNCTIONAL_GROUPS: List[FunctionalGroup] = [
         wavenumber_range=(3300, 3500),
         intensity="medium",
         notes="Primary and secondary amine N-H stretches.",
+    ),
+    FunctionalGroup(
+        name="Amine C-N stretch",
+        smarts="[NX3;!$(NC=O)]-C",
+        wavenumber_range=(1020, 1230),
+        intensity="medium",
+        notes="C-N stretch common to aliphatic and aromatic amines.",
     ),
     FunctionalGroup(
         name="Ether C-O stretch",

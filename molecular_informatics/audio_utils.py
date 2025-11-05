@@ -1,8 +1,8 @@
-"""Audio synthesis utilities for FTIR-to-sound conversion."""
+"""Audio synthesis utilities for FTIR-to-sound conversion and arrangement."""
 from __future__ import annotations
 
 import io
-from typing import Iterable, List, Sequence, Tuple, Union
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -30,28 +30,180 @@ def map_wavenumber_to_audible(
     return audio_min + scale * (audio_max - audio_min)
 
 
+def _oscillator(
+    t: np.ndarray,
+    frequency: float,
+    *,
+    shape: str,
+    detune: float,
+    harmonics: Sequence[Tuple[int, float]],
+    sub_osc: float,
+    noise_mix: float,
+) -> np.ndarray:
+    """Generate an oscillator waveform for ``frequency`` over time vector ``t``."""
+
+    # Interpret detune in semitones relative to the base frequency.
+    detune_ratio = 2 ** (detune / 12.0)
+    base_freq = max(0.0, frequency * detune_ratio)
+    phase = 2 * np.pi * base_freq * t
+
+    if shape == "square":
+        wave = np.sign(np.sin(phase))
+    elif shape == "saw":
+        wave = 2.0 * ((phase / (2 * np.pi)) % 1.0) - 1.0
+    elif shape == "triangle":
+        wave = 2.0 * np.abs(2.0 * ((phase / (2 * np.pi)) % 1.0) - 1.0) - 1.0
+    elif shape == "noise":
+        wave = np.random.uniform(-1.0, 1.0, size=t.shape)
+    else:  # default to sine
+        wave = np.sin(phase)
+
+    for multiple, amplitude in harmonics:
+        if amplitude:
+            wave += amplitude * np.sin(2 * np.pi * base_freq * multiple * t)
+
+    if sub_osc:
+        wave += sub_osc * np.sin(2 * np.pi * (base_freq / 2.0) * t)
+
+    if noise_mix:
+        wave = (1 - noise_mix) * wave + noise_mix * np.random.uniform(
+            -1.0, 1.0, size=t.shape
+        )
+
+    return wave.astype(np.float32)
+
+
+def _adsr_envelope(
+    length: int,
+    *,
+    sample_rate: int,
+    attack: float,
+    decay: float,
+    sustain_level: float,
+    release: float,
+) -> np.ndarray:
+    """Construct an ADSR envelope with the provided parameters."""
+
+    envelope = np.ones(length, dtype=np.float32)
+
+    attack_samples = int(max(0.0, attack) * sample_rate)
+    decay_samples = int(max(0.0, decay) * sample_rate)
+    release_samples = int(max(0.0, release) * sample_rate)
+    sustain_level = float(min(max(sustain_level, 0.0), 1.0))
+
+    total_env = attack_samples + decay_samples + release_samples
+    if total_env > length:
+        scale = length / max(total_env, 1)
+        attack_samples = int(round(attack_samples * scale))
+        decay_samples = int(round(decay_samples * scale))
+        release_samples = int(round(release_samples * scale))
+
+    cursor = 0
+    if attack_samples > 0:
+        envelope[:attack_samples] = np.linspace(0.0, 1.0, attack_samples, endpoint=False)
+        cursor += attack_samples
+
+    if decay_samples > 0 and cursor < length:
+        end = min(length, cursor + decay_samples)
+        envelope[cursor:end] = np.linspace(1.0, sustain_level, end - cursor, endpoint=False)
+        cursor = end
+
+    sustain_samples = max(0, length - cursor - release_samples)
+    if sustain_samples > 0 and cursor < length:
+        envelope[cursor:cursor + sustain_samples] = sustain_level
+        cursor += sustain_samples
+
+    if release_samples > 0 and cursor < length:
+        release_start = envelope[cursor - 1] if cursor > 0 else sustain_level
+        envelope[cursor:] = np.linspace(release_start, 0.0, length - cursor, endpoint=True)
+    elif cursor < length:
+        envelope[cursor:] = sustain_level
+
+    return envelope
+
+
+def _apply_envelope(
+    waveform: np.ndarray,
+    *,
+    envelope: str,
+    sample_rate: int,
+    envelope_params: Optional[Dict[str, float]] = None,
+) -> np.ndarray:
+    """Apply one of the supported envelope shapes to ``waveform``."""
+
+    if waveform.size == 0:
+        return waveform
+
+    envelope = envelope.lower()
+    if envelope == "none":
+        return waveform.astype(np.float32)
+
+    if envelope == "hann":
+        return (waveform * np.hanning(len(waveform))).astype(np.float32)
+
+    if envelope == "adsr":
+        params = envelope_params or {}
+        adsr = _adsr_envelope(
+            len(waveform),
+            sample_rate=sample_rate,
+            attack=float(params.get("attack", 0.05)),
+            decay=float(params.get("decay", 0.1)),
+            sustain_level=float(params.get("sustain_level", 0.7)),
+            release=float(params.get("release", 0.2)),
+        )
+        return (waveform * adsr).astype(np.float32)
+
+    return waveform.astype(np.float32)
+
+
 def generate_waveform(
     frequencies: Sequence[Union[float, AudioComponent]],
+    *,
     duration: float = 2.0,
     sample_rate: int = 44100,
     envelope: str = "hann",
+    waveform_shape: str = "sine",
+    detune: float = 0.0,
+    harmonics: Optional[Sequence[Tuple[int, float]]] = None,
+    sub_osc: float = 0.0,
+    noise_mix: float = 0.0,
+    envelope_params: Optional[Dict[str, float]] = None,
 ) -> np.ndarray:
-    """Generate a waveform by summing sine waves at ``frequencies``."""
+    """Generate a waveform by summing oscillators for ``frequencies``."""
 
-    t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
-    waveform = np.zeros_like(t)
+    sample_count = int(sample_rate * duration)
+    if sample_count <= 0:
+        return np.zeros(0, dtype=np.float32)
+
+    t = np.linspace(0, duration, sample_count, endpoint=False)
+    waveform = np.zeros_like(t, dtype=np.float32)
+
+    harmonics = harmonics or []
     for component in frequencies:
         if isinstance(component, tuple):
             freq, amplitude = component
         else:
             freq, amplitude = component, 1.0
-        waveform += amplitude * np.sin(2 * np.pi * freq * t)
+        if freq <= 0 or amplitude == 0:
+            continue
+        osc = _oscillator(
+            t,
+            freq,
+            shape=waveform_shape,
+            detune=detune,
+            harmonics=harmonics,
+            sub_osc=sub_osc,
+            noise_mix=noise_mix,
+        )
+        waveform += amplitude * osc
 
-    if envelope == "hann":
-        window = np.hanning(len(t))
-        waveform *= window
+    waveform = _apply_envelope(
+        waveform,
+        envelope=envelope,
+        sample_rate=sample_rate,
+        envelope_params=envelope_params,
+    )
 
-    # Normalise to prevent clipping
     max_amp = np.max(np.abs(waveform))
     if max_amp > 0:
         waveform = waveform / max_amp
