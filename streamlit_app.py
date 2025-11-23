@@ -79,13 +79,24 @@ def render_audio_section(
         "The following audible frequencies are linearly mapped from the"
         " FTIR center wavenumbers."
     )
+    # Compute per-match frequencies and contributions so the table columns stay aligned
+    total_occurrences = sum(m.match_count for m in present_matches) or 1
+    display_frequencies = [
+        audio_utils._wrap_frequency_to_band(  # type: ignore[attr-defined]
+            audio_utils.map_wavenumber_to_audible(m.group.center_wavenumber)
+        )
+        for m in present_matches
+    ]
+    contributions = [
+        f"{(m.match_count / total_occurrences) * 100:.1f}" for m in present_matches
+    ]
     freq_table = pd.DataFrame(
         {
             "Functional group": [m.group.name for m in present_matches],
             "Center (cm⁻¹)": [m.group.center_wavenumber for m in present_matches],
             "Occurrences": [m.match_count for m in present_matches],
-            "Contribution (%)": [f"{weight * 100:.1f}" for _, weight in components],
-            "Audio frequency (Hz)": [f"{freq:.1f}" for freq, _ in components],
+            "Contribution (%)": contributions,
+            "Audio frequency (Hz)": [f"{freq:.1f}" for freq in display_frequencies],
         }
     )
     st.dataframe(freq_table, hide_index=True)
@@ -94,7 +105,6 @@ def render_audio_section(
         components, duration=duration, sample_rate=sample_rate
     )
     audio_bytes = audio_utils.waveform_to_wav_bytes(waveform, sample_rate=sample_rate)
-    st.audio(audio_bytes, format="audio/wav")
     download_key = f"download_{heading.replace(' ', '_').lower()}"
     st.download_button(
         "Download WAV",
@@ -105,7 +115,7 @@ def render_audio_section(
     )
     st.caption(
         "Add or remove functional groups to reshape the sonic palette."
-        " Try adjusting the duration to hear sustained harmonics."
+        " Playback is consolidated in the piano roll – add the molecule clip there to hear it."
     )
     return {
         "components": components,

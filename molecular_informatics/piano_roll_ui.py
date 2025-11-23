@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+from components.looping_player import render_looping_audio_player
 from . import audio_utils, piano_roll
 
 
@@ -37,10 +38,16 @@ def _default_track_payload(
         "duration": float(duration),
         "loop_count": 1,
         "crossfade": 0.0,
-        "loop_mode": "fixed",
+        "loop_mode": "continuous",
         "is_enabled": True,
         "is_muted": False,
         "is_solo": False,
+        "bar_start": 1,
+        "bar_end": 1,
+        "tone_preset": "Custom",
+        "quantize_scale": False,
+        "quantize_root": "C",
+        "quantize_mode": "major",
         "components": list(components or []),
         "source": "components",
         "audio_bytes": None,
@@ -123,7 +130,12 @@ def _add_uploaded_track(payload: Dict[str, Any]):
     _tracks_state().append(track)
 
 
-def _build_piano_roll_figure(events: List[piano_roll.PianoRollEvent]):
+def _build_piano_roll_figure(
+    events: List[piano_roll.PianoRollEvent],
+    *,
+    render_length: Optional[float],
+    bar_length: Optional[float],
+):
     if not events:
         return None
 
@@ -177,6 +189,24 @@ def _build_piano_roll_figure(events: List[piano_roll.PianoRollEvent]):
         )
 
     ordered_notes = [note for note, _ in sorted(note_order.items(), key=lambda item: item[1])]
+
+    shapes = []
+    if render_length and bar_length and bar_length > 0:
+        bar_line = 0.0
+        while bar_line <= render_length:
+            shapes.append(
+                dict(
+                    type="line",
+                    x0=bar_line,
+                    x1=bar_line,
+                    y0=-0.5,
+                    y1=len(ordered_notes) + 0.5,
+                    line=dict(color="rgba(0,0,0,0.15)", width=1),
+                    layer="below",
+                )
+            )
+            bar_line += bar_length
+
     fig.update_layout(
         barmode="overlay",
         bargap=0.15,
@@ -187,6 +217,7 @@ def _build_piano_roll_figure(events: List[piano_roll.PianoRollEvent]):
         height=max(320, 60 + 30 * len(ordered_notes)),
         legend_title="Tracks",
         margin=dict(l=60, r=30, t=40, b=60),
+        shapes=shapes,
     )
     return fig
 
@@ -206,7 +237,14 @@ def _render_transport_controls(tracks: List[Dict[str, Any]]):
             track["is_muted"] = False
 
 
-def _render_track_editor(track: Dict[str, Any], *, sample_rate: int) -> Dict[str, bool]:
+def _render_track_editor(
+    track: Dict[str, Any],
+    *,
+    sample_rate: int,
+    bar_count: int,
+    bar_length: float,
+    grid_step_bars: float,
+) -> Dict[str, bool]:
     actions = {"remove": False, "preview": False}
     header = f"{track.get('name', 'Track')}"
     if track.get("source") == "upload" and track.get("upload_name"):
@@ -243,15 +281,21 @@ def _render_track_editor(track: Dict[str, Any], *, sample_rate: int) -> Dict[str
         arrange_tab, synth_tab, effects_tab = st.tabs(["Arrange", "Synth", "Effects"])
 
         with arrange_tab:
-            track["start_time"] = float(
-                st.number_input(
-                    "Start time (s)",
-                    min_value=0.0,
-                    step=0.25,
-                    value=float(track.get("start_time", 0.0)),
-                    key=f"track_start_{track['id']}",
+            if bar_count > 1 and bar_length > 0:
+                start_bar_pos = float(
+                    st.slider(
+                        "Start position (bars)",
+                        min_value=0.0,
+                        max_value=float(bar_count - 1),
+                        value=float(track.get("start_time", 0.0)) / bar_length,
+                        step=float(max(grid_step_bars, 0.01)),
+                        key=f"track_start_bar_{track['id']}",
+                        help="Set where this clip enters the loop; values are in bars.",
+                    )
                 )
-            )
+            else:
+                start_bar_pos = 0.0
+            track["start_time"] = max(0.0, start_bar_pos * bar_length if bar_length else 0.0)
             track["duration"] = float(
                 st.number_input(
                     "Clip duration (s)",
@@ -299,6 +343,25 @@ def _render_track_editor(track: Dict[str, Any], *, sample_rate: int) -> Dict[str
                     key=f"track_crossfade_{track['id']}",
                 )
             )
+            if bar_count > 1:
+                current_start = max(1, int(track.get("bar_start", 1) or 1))
+                current_end = int(track.get("bar_end", bar_count) or bar_count)
+                if current_end < current_start:
+                    current_end = current_start
+                # When new bars are added, expand the default range instead of leaving gaps.
+                if current_start == 1 and current_end == 1 and bar_count > 1:
+                    current_end = bar_count
+                bar_range = st.slider(
+                    "Active bars",
+                    min_value=1,
+                    max_value=bar_count,
+                    value=(current_start, min(current_end, bar_count)),
+                    key=f"track_bar_range_{track['id']}",
+                    help="Only play this clip (and its effects) within the selected bars.",
+                )
+                track["bar_start"], track["bar_end"] = bar_range
+            else:
+                track["bar_start"], track["bar_end"] = 1, 1
             track["drone_mode"] = st.checkbox(
                 "Drone sustain (disable fade)",
                 value=track.get("drone_mode", False),
@@ -315,6 +378,15 @@ def _render_track_editor(track: Dict[str, Any], *, sample_rate: int) -> Dict[str
             if track.get("source") == "upload":
                 st.info("Uploaded clips bypass the synth oscillator controls.")
             else:
+                preset = st.selectbox(
+                    "Tone preset",
+                    options=["Custom", "Soft pad", "Lo-fi"],
+                    index=["Custom", "Soft pad", "Lo-fi"].index(track.get("tone_preset", "Custom")),
+                    key=f"track_tone_preset_{track['id']}",
+                    help="Quickly soften or texture the sound; choose Custom to dial in manually.",
+                )
+                track["tone_preset"] = preset
+
                 track["waveform_shape"] = st.selectbox(
                     "Oscillator",
                     options=["sine", "square", "saw", "triangle", "noise"],
@@ -421,7 +493,7 @@ def _render_track_editor(track: Dict[str, Any], *, sample_rate: int) -> Dict[str
                             step=0.01,
                             key=f"track_adsr_release_{track['id']}",
                         )
-                    )
+                )
 
                 pitch_mode_map = {
                     "harmonic": "Use molecular harmonics",
@@ -471,6 +543,33 @@ def _render_track_editor(track: Dict[str, Any], *, sample_rate: int) -> Dict[str
                     )
 
         with effects_tab:
+            if track.get("source") != "upload":
+                quantize = st.checkbox(
+                    "Quantize to scale",
+                    value=track.get("quantize_scale", False),
+                    key=f"track_quantize_scale_{track['id']}",
+                    help="Snap molecular frequencies to a musical scale for smoother chords.",
+                )
+                track["quantize_scale"] = quantize
+                if quantize:
+                    cols = st.columns([1, 1])
+                    track["quantize_root"] = cols[0].selectbox(
+                        "Scale root",
+                        options=["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"],
+                        index=["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"].index(
+                            track.get("quantize_root", "C")
+                        ),
+                        key=f"track_quantize_root_{track['id']}",
+                    )
+                    track["quantize_mode"] = cols[1].selectbox(
+                        "Scale",
+                        options=["major", "minor", "dorian", "mixolydian", "lydian", "phrygian", "locrian"],
+                        index=["major", "minor", "dorian", "mixolydian", "lydian", "phrygian", "locrian"].index(
+                            track.get("quantize_mode", "major")
+                        ),
+                        key=f"track_quantize_mode_{track['id']}",
+                    )
+
             track["gain_db"] = float(
                 st.slider(
                     "Gain (dB)",
@@ -627,20 +726,40 @@ def render_piano_roll_section(
 
     settings_state = st.session_state.setdefault(
         "piano_roll_settings",
-        {"render_length": 30.0},
+        {"bar_count": 1, "render_length": duration, "grid_step_bars": 0.25},
     )
-    arrangement_length = st.slider(
-        "Arrangement length (s)",
-        min_value=5.0,
-        max_value=120.0,
-        value=float(settings_state.get("render_length", 30.0)),
-        step=1.0,
-        help="Rendered duration for playback and downloads. Continuous tracks repeat to fill this time.",
-        key="piano_roll_arrangement_length",
+
+    base_clip_length = duration
+    if tracks:
+        base_clip_length = float(tracks[0].get("duration", duration) or duration)
+    base_clip_length = max(base_clip_length, 0.1)
+
+    bar_count = st.slider(
+        "Arrangement bars (multiples of clip length)",
+        min_value=1,
+        max_value=64,
+        value=int(settings_state.get("bar_count", 1)),
+        step=1,
+        help="Each bar repeats the base clip length. Tracks in continuous mode will loop to fill this time.",
+        key="piano_roll_bar_count",
     )
+    arrangement_length = base_clip_length * bar_count
+    settings_state["bar_count"] = bar_count
     settings_state["render_length"] = arrangement_length
+    settings_state["bar_length"] = base_clip_length
+    grid_step_bars = st.select_slider(
+        "Grid resolution (bars)",
+        options=[1.0, 0.5, 0.25],
+        value=float(settings_state.get("grid_step_bars", 0.25)),
+        format_func=lambda v: f"{v} bar" if v == 1.0 else f"{int(1/v)} per bar",
+        key="piano_roll_grid_step",
+        help="Snap start positions to a DAW-like grid.",
+    )
+    settings_state["grid_step_bars"] = float(grid_step_bars)
     st.caption(
-        "Changes to track settings re-render the audio immediately. Restart playback after tweaks for smooth results."
+        f"Current length: {arrangement_length:.2f}s"
+        f" (clip {base_clip_length:.2f}s × {bar_count} bars)."
+        " Tracks default to continuous looping so you hear the clip repeat across bars."
     )
 
     add_cols = st.columns([2, 1, 1])
@@ -688,7 +807,16 @@ def render_piano_roll_section(
     removal_ids: List[str] = []
 
     for track in list(tracks):
-        actions = _render_track_editor(track, sample_rate=sample_rate)
+        # Ensure bar gating defaults exist
+        track.setdefault("bar_start", 1)
+        track.setdefault("bar_end", bar_count)
+        actions = _render_track_editor(
+            track,
+            sample_rate=sample_rate,
+            bar_count=bar_count,
+            bar_length=base_clip_length,
+            grid_step_bars=float(grid_step_bars),
+        )
         if actions["remove"]:
             removal_ids.append(track["id"])
         if actions["preview"]:
@@ -704,6 +832,7 @@ def render_piano_roll_section(
         tracks,
         sample_rate=sample_rate,
         render_length=arrangement_length,
+        bar_length=base_clip_length,
     )
     waveform = arrangement.get("waveform")
     events = arrangement.get("events") or []
@@ -712,8 +841,34 @@ def render_piano_roll_section(
     transport = _transport_state()
     if isinstance(waveform, np.ndarray) and waveform.size:
         audio_bytes = audio_utils.waveform_to_wav_bytes(waveform, sample_rate=sample_rate)
-        if transport.get("playing", False):
-            st.audio(audio_bytes, format="audio/wav")
+
+        if transport.get("playing") and "pr_loop_player_autoplay" not in st.session_state:
+            st.session_state["pr_loop_player_autoplay"] = True
+
+        loop_col, autoplay_col = st.columns([1, 1])
+        loop_enabled = loop_col.toggle(
+            "Loop arrangement",
+            value=st.session_state.get("pr_loop_player_loop", True),
+            key="pr_loop_player_loop",
+            help="Keep the arrangement running while you tweak tracks and effects.",
+        )
+        autoplay_enabled = autoplay_col.toggle(
+            "Auto-play on change",
+            value=st.session_state.get(
+                "pr_loop_player_autoplay", transport.get("playing", False)
+            ),
+            key="pr_loop_player_autoplay",
+            help="Restart playback after edits for near real-time feedback.",
+        )
+
+        render_looping_audio_player(
+            audio_bytes=audio_bytes,
+            waveform=waveform,
+            sample_rate=sample_rate,
+            loop=loop_enabled,
+            autoplay=autoplay_enabled,
+            height=260,
+        )
         st.download_button(
             "Download arrangement",
             data=audio_bytes,
@@ -727,7 +882,11 @@ def render_piano_roll_section(
     if summary:
         st.dataframe(pd.DataFrame(summary), hide_index=True)
 
-    figure = _build_piano_roll_figure(events)
+    figure = _build_piano_roll_figure(
+        events,
+        render_length=arrangement_length,
+        bar_length=base_clip_length,
+    )
     if figure is not None:
         st.plotly_chart(figure, use_container_width=True)
     else:

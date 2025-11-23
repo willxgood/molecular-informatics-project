@@ -57,6 +57,16 @@ NOTE_OFFSETS = {
 }
 NOTE_NAME_PATTERN = re.compile(r"^([A-G])(#?)(-?\d+)$")
 
+SCALE_INTERVALS = {
+    "major": [0, 2, 4, 5, 7, 9, 11],
+    "minor": [0, 2, 3, 5, 7, 8, 10],
+    "dorian": [0, 2, 3, 5, 7, 9, 10],
+    "mixolydian": [0, 2, 4, 5, 7, 9, 10],
+    "lydian": [0, 2, 4, 6, 7, 9, 11],
+    "phrygian": [0, 1, 3, 5, 7, 8, 10],
+    "locrian": [0, 1, 3, 5, 6, 8, 10],
+}
+
 
 def frequency_to_midi(frequency: float) -> float:
     """Convert a frequency in Hz to a MIDI note number."""
@@ -109,6 +119,34 @@ def note_name_to_frequency(note_name: str) -> Optional[float]:
     if midi is None:
         return None
     return 440.0 * (2 ** ((midi - 69) / 12.0))
+
+
+def _quantize_frequency_to_scale(
+    frequency: float,
+    *,
+    root: str,
+    mode: str,
+) -> float:
+    """Snap ``frequency`` to the nearest note in the given scale."""
+
+    if frequency <= 0:
+        return frequency
+
+    midi_val = frequency_to_midi(frequency)
+    root_offset = NOTE_OFFSETS.get(root.upper().replace("B", "B").replace("H", "B"), 0)
+    intervals = SCALE_INTERVALS.get(mode, SCALE_INTERVALS["major"])
+
+    # Build candidate MIDI notes around the current pitch to find the closest.
+    candidates: List[float] = []
+    for octave in range(-2, 3):
+        base = (octave + 5) * 12 + root_offset  # centre near middle C
+        candidates.extend(base + interval for interval in intervals)
+
+    if not candidates:
+        return frequency
+
+    closest = min(candidates, key=lambda cand: abs(cand - midi_val))
+    return float(440.0 * (2 ** ((closest - 69) / 12.0)))
 
 
 def components_to_events(
@@ -290,6 +328,16 @@ def build_track_waveform(
     else:
         active_components = [(float(freq), float(weight)) for freq, weight in components]
 
+    # Optional quantization to a musical scale for smoother tonality.
+    if track.get("quantize_scale"):
+        root = (track.get("quantize_root") or "C").upper()
+        mode = (track.get("quantize_mode") or "major").lower()
+        quantized: List[AudioComponent] = []
+        for freq, weight in active_components:
+            snapped = _quantize_frequency_to_scale(freq, root=root, mode=mode)
+            quantized.append((snapped, weight))
+        active_components = quantized
+
     if not active_components:
         return np.zeros(0, dtype=np.float32), 0.0, []
 
@@ -330,8 +378,8 @@ def render_track_audio(
     *,
     sample_rate: int,
     render_length: Optional[float] = None,
-) -> Tuple[np.ndarray, float, int, List[AudioComponent]]:
-    """Return the processed audio, clip duration, loop count, and active components."""
+) -> Tuple[np.ndarray, float, int, List[AudioComponent], np.ndarray]:
+    """Return processed audio, clip duration, loop count, active components, and dry audio."""
 
     base_waveform, duration, active_components = build_track_waveform(
         track,
@@ -355,10 +403,35 @@ def render_track_audio(
         crossfade=float(track.get("crossfade", 0.0) or 0.0),
     )
 
-    processed = apply_effect_chain(
-        looped,
-        sample_rate=sample_rate,
-        settings={
+    # Apply tone presets in a non-destructive way for smoother UX.
+    tone_preset = (track.get("tone_preset") or "Custom").lower()
+    preset_settings: Dict[str, Optional[float]] = {}
+    if tone_preset == "soft pad":
+        preset_settings = {
+            "lowpass_cutoff": float(track.get("lowpass_cutoff") or 1200.0),
+            "highpass_cutoff": float(track.get("highpass_cutoff") or 80.0),
+            "reverb_wet": float(track.get("reverb_wet") or 0.35),
+            "reverb_size": float(track.get("reverb_size") or 0.6),
+            "reverb_decay": float(track.get("reverb_decay") or 0.75),
+            "gain_db": track.get("gain_db"),
+            "delay_seconds": track.get("delay_seconds"),
+            "delay_feedback": track.get("delay_feedback"),
+            "delay_mix": track.get("delay_mix"),
+        }
+    elif tone_preset == "lo-fi":
+        preset_settings = {
+            "lowpass_cutoff": float(track.get("lowpass_cutoff") or 900.0),
+            "highpass_cutoff": float(track.get("highpass_cutoff") or 120.0),
+            "reverb_wet": float(track.get("reverb_wet") or 0.15),
+            "reverb_size": float(track.get("reverb_size") or 0.35),
+            "reverb_decay": float(track.get("reverb_decay") or 0.4),
+            "delay_seconds": float(track.get("delay_seconds") or 0.25),
+            "delay_feedback": float(track.get("delay_feedback") or 0.25),
+            "delay_mix": float(track.get("delay_mix") or 0.25),
+            "gain_db": track.get("gain_db"),
+        }
+    else:
+        preset_settings = {
             "gain_db": track.get("gain_db"),
             "highpass_cutoff": track.get("highpass_cutoff"),
             "lowpass_cutoff": track.get("lowpass_cutoff"),
@@ -368,14 +441,20 @@ def render_track_audio(
             "reverb_wet": track.get("reverb_wet"),
             "reverb_size": track.get("reverb_size"),
             "reverb_decay": track.get("reverb_decay"),
-        },
+        }
+
+    processed = apply_effect_chain(
+        looped,
+        sample_rate=sample_rate,
+        settings=preset_settings,
     )
 
     volume = float(track.get("track_volume", 1.0) or 1.0)
     if volume != 1.0:
         processed = (processed * volume).astype(np.float32)
+        looped = (looped * volume).astype(np.float32)
 
-    return processed, duration, loops_needed, active_components
+    return processed, duration, loops_needed, active_components, looped
 
 
 def build_arrangement(
@@ -383,6 +462,7 @@ def build_arrangement(
     *,
     sample_rate: int,
     render_length: Optional[float] = None,
+    bar_length: Optional[float] = None,
 ) -> Dict[str, Union[np.ndarray, List[PianoRollEvent], List[Dict[str, str]]]]:
     """Render ``tracks`` into a mixed waveform and metadata payload."""
 
@@ -400,7 +480,7 @@ def build_arrangement(
         if solo_active and not track.get("is_solo", False):
             continue
 
-        processed, duration, loops_used, active_components = render_track_audio(
+        processed, duration, loops_used, active_components, dry_waveform = render_track_audio(
             track,
             sample_rate=sample_rate,
             render_length=render_length,
@@ -409,23 +489,53 @@ def build_arrangement(
             continue
 
         start_time = float(track.get("start_time", 0.0) or 0.0)
-        segments.append((processed, start_time))
+
+        # Apply bar-based gating so effects can live in selected bars only.
+        bar_start = int(track.get("bar_start", 1) or 1)
+        bar_end = int(track.get("bar_end", bar_start) or bar_start)
+        track_start = start_time
+        track_end = track_start + len(processed) / sample_rate
+
+        # Always include a dry layer; effects are injected only inside the active bar window.
+        if bar_length and bar_end >= bar_start:
+            active_start = (bar_start - 1) * bar_length
+            active_end = bar_end * bar_length
+            overlap_start = max(track_start, active_start)
+            overlap_end = min(track_end, active_end)
+
+            # Dry before the active window
+            if overlap_start > track_start:
+                dry_before_end_idx = int(round((overlap_start - track_start) * sample_rate))
+                segments.append((dry_waveform[:dry_before_end_idx], track_start))
+
+            # Wet inside the active window
+            if overlap_end > overlap_start:
+                wet_start_idx = int(round((overlap_start - track_start) * sample_rate))
+                wet_end_idx = int(round((overlap_end - track_start) * sample_rate))
+                wet_slice = processed[wet_start_idx:wet_end_idx]
+                segments.append((wet_slice, overlap_start))
+
+            # Dry after the active window
+            if overlap_end < track_end:
+                dry_after_start_idx = int(round((overlap_end - track_start) * sample_rate))
+                segments.append((dry_waveform[dry_after_start_idx:], overlap_end))
+        else:
+            # No bar gating: use the effected signal throughout.
+            segments.append((processed, track_start))
 
         track_name = track.get("name") or "Track"
         components = active_components or []
-        if components:
-            for loop_index in range(loops_used):
-                loop_start = start_time + loop_index * duration
-                events.extend(
-                    components_to_events(
-                        components,
-                        start=loop_start,
-                        duration=duration,
-                        label=track_name,
-                    )
-                )
-
         rendered_length = len(processed) / sample_rate
+        if components and rendered_length > 0:
+            events.extend(
+                components_to_events(
+                    components,
+                    start=start_time,
+                    duration=rendered_length,
+                    label=track_name,
+                )
+            )
+
         summary.append(
             {
                 "Track": track_name,
@@ -433,6 +543,7 @@ def build_arrangement(
                 "Loops": "continuous" if track.get("loop_mode") == "continuous" else str(loops_used),
                 "Length (s)": f"{rendered_length:.2f}",
                 "Gain (dB)": f"{float(track.get('gain_db', 0.0) or 0.0):+.1f}",
+                "Bars": f"{bar_start}–{bar_end}" if bar_length else "all",
             }
         )
 
