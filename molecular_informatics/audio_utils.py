@@ -19,7 +19,7 @@ def wavenumber_to_frequency_cm1(wavenumber: float) -> float:
 def map_wavenumber_to_audible(
     wavenumber: float,
     wn_range: Tuple[float, float] = (400.0, 4000.0),
-    audible_range: Tuple[float, float] = (220.0, 1760.0),
+    audible_range: Tuple[float, float] = (100.0, 4000.0),
 ) -> float:
     """Map an IR wavenumber to an audible frequency via linear scaling."""
 
@@ -265,7 +265,13 @@ def waveform_to_wav_bytes(waveform: np.ndarray, sample_rate: int = 44100) -> byt
     return buffer.getvalue()
 
 
-def groups_to_audio_components(matches: Iterable) -> List[AudioComponent]:
+def groups_to_audio_components(
+    matches: Iterable,
+    *,
+    audible_range: Tuple[float, float] = (100.0, 4000.0),
+    wrap: bool = False,
+    wrap_band: Tuple[float, float] = (110.0, 880.0),
+) -> List[AudioComponent]:
     """Convert functional group matches to (frequency, amplitude) components."""
 
     components: List[AudioComponent] = []
@@ -276,8 +282,9 @@ def groups_to_audio_components(matches: Iterable) -> List[AudioComponent]:
 
     for match in filtered:
         center = match.group.center_wavenumber
-        audio_freq = map_wavenumber_to_audible(center)
-        audio_freq = _wrap_frequency_to_band(audio_freq)
+        audio_freq = map_wavenumber_to_audible(center, audible_range=audible_range)
+        if wrap:
+            audio_freq = _wrap_frequency_to_band(audio_freq, low=wrap_band[0], high=wrap_band[1])
         weight = match.match_count / total_occurrences if total_occurrences else 0.0
         components.append((audio_freq, weight))
 

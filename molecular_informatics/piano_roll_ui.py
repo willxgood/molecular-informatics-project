@@ -10,7 +10,10 @@ import pandas as pd
 import streamlit as st
 
 from components.looping_player import render_looping_audio_player
-from . import audio_utils, piano_roll
+from components.molecule_visualizer import render_molecule_visualizer
+from rdkit import Chem
+
+from . import audio_utils, chem_utils, piano_roll
 
 
 def _tracks_state() -> List[Dict[str, Any]]:
@@ -48,6 +51,7 @@ def _default_track_payload(
         "quantize_scale": False,
         "quantize_root": "C",
         "quantize_mode": "major",
+        "match_payload": None,
         "components": list(components or []),
         "source": "components",
         "audio_bytes": None,
@@ -87,8 +91,17 @@ def _add_molecule_track(
     name: str,
     components: List[piano_roll.AudioComponent],
     duration: float,
+    smiles: str,
+    matches: Optional[List[chem_utils.FunctionalGroupMatch]] = None,
 ):
     track = _default_track_payload(name=name, duration=duration, components=components)
+    track["smiles"] = smiles
+    if matches:
+        track["match_payload"] = [
+            {"wn": float(m.group.center_wavenumber), "count": int(m.match_count)}
+            for m in matches
+            if m.present
+        ]
     _tracks_state().append(track)
 
 
@@ -713,12 +726,44 @@ def _render_track_editor(
     return actions
 
 
+def _collect_molecule_visuals(
+    tracks: List[Dict[str, Any]],
+    current: Optional[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Collect unique molecule visuals from tracks plus the current molecule."""
+
+    visuals: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add_entry(smiles: str, preset_matches: Optional[List[chem_utils.FunctionalGroupMatch]] = None):
+        if not smiles or smiles in seen:
+            return
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            return
+        matches = preset_matches or chem_utils.find_functional_groups(mol)
+        visuals.append({"smiles": smiles, "mol": mol, "matches": matches})
+        seen.add(smiles)
+
+    if current and current.get("smiles"):
+        add_entry(str(current["smiles"]), current.get("matches"))
+
+    for track in tracks:
+        smiles = track.get("smiles")
+        if isinstance(smiles, str):
+            add_entry(smiles)
+
+    return visuals
+
+
 def render_piano_roll_section(
     *,
     info,
     components: List[piano_roll.AudioComponent],
     duration: float,
     sample_rate: int,
+    matches: Optional[List[chem_utils.FunctionalGroupMatch]] = None,
+    mapping_config: Optional[Dict[str, object]] = None,
 ):
     st.subheader("Piano roll arranger")
 
@@ -774,6 +819,8 @@ def render_piano_roll_section(
                 name=info.smiles,
                 components=components,
                 duration=duration,
+                smiles=info.smiles,
+                matches=matches,
             )
     with add_cols[2]:
         uploaded_file = st.file_uploader(
@@ -800,6 +847,29 @@ def render_piano_roll_section(
             " start building the arrangement."
         )
         return
+
+    def _remap_track_components(track: Dict[str, Any]):
+        if track.get("source") != "components":
+            return
+        payload = track.get("match_payload")
+        if not payload:
+            return
+        total = sum(item.get("count", 0) for item in payload) or 1
+        audible_range = mapping_config.get("audible_range", (100.0, 4000.0)) if mapping_config else (100.0, 4000.0)
+        wrap = bool(mapping_config.get("wrap", False)) if mapping_config else False
+        wrap_band = mapping_config.get("wrap_band", (110.0, 880.0)) if mapping_config else (110.0, 880.0)
+        remapped: List[piano_roll.AudioComponent] = []
+        for item in payload:
+            wn = float(item.get("wn", 0.0))
+            count = float(item.get("count", 0.0))
+            freq = audio_utils.map_wavenumber_to_audible(wn, audible_range=audible_range)
+            if wrap:
+                freq = audio_utils._wrap_frequency_to_band(freq, low=wrap_band[0], high=wrap_band[1])  # type: ignore[attr-defined]
+            remapped.append((freq, count / total))
+        track["components"] = remapped
+
+    for track in tracks:
+        _remap_track_components(track)
 
     _render_transport_controls(tracks)
 
@@ -861,14 +931,33 @@ def render_piano_roll_section(
             help="Restart playback after edits for near real-time feedback.",
         )
 
-        render_looping_audio_player(
+        audio_element_id = render_looping_audio_player(
             audio_bytes=audio_bytes,
-            waveform=waveform,
+            waveform=np.array([], dtype=np.float32),  # skip waveform viz to avoid overlap
             sample_rate=sample_rate,
             loop=loop_enabled,
             autoplay=autoplay_enabled,
-            height=260,
+            height=120,
         )
+        # Collect visuals for all molecules present in the session (current + tracks)
+        current_context = {"smiles": info.smiles, "matches": matches}
+        visuals = _collect_molecule_visuals(tracks, current_context)
+        if visuals:
+            st.markdown("**FTIR vibration visualisers**")
+            vis_cols = st.columns(min(3, len(visuals)))
+            for idx, visual in enumerate(visuals):
+                col = vis_cols[idx % len(vis_cols)]
+                with col:
+                    render_molecule_visualizer(
+                        mol=visual["mol"],
+                        matches=visual["matches"],
+                        audio_element_id=audio_element_id,
+                        audible_range=mapping_config.get("audible_range", (100.0, 4000.0)) if mapping_config else (100.0, 4000.0),
+                        wrap=bool(mapping_config.get("wrap", False)) if mapping_config else False,
+                        wrap_band=mapping_config.get("wrap_band", (110.0, 880.0)) if mapping_config else (110.0, 880.0),
+                        width=520,
+                        height=360,
+                    )
         st.download_button(
             "Download arrangement",
             data=audio_bytes,

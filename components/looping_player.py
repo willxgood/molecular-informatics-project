@@ -31,8 +31,11 @@ def render_looping_audio_player(
     loop: bool = True,
     autoplay: bool = True,
     height: int = 240,
-) -> Optional[None]:
-    """Embed a custom looping player with a lightweight waveform visual."""
+) -> Optional[str]:
+    """Embed a custom looping player with a lightweight waveform visual.
+
+    Returns the audio element ID so other components can sync to playback.
+    """
 
     if not isinstance(audio_bytes, (bytes, bytearray)):
         return None
@@ -132,4 +135,4 @@ def render_looping_audio_player(
     </div>
     """
     st.components.v1.html(html, height=height)
-    return None
+    return f"audio-{uid}"

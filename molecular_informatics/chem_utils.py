@@ -126,6 +126,7 @@ class FunctionalGroupMatch:
 
     group: FunctionalGroup
     match_count: int
+    atom_matches: Optional[List[tuple]] = None
 
     @property
     def present(self) -> bool:
@@ -155,7 +156,13 @@ def find_functional_groups(mol: Chem.Mol) -> List[FunctionalGroupMatch]:
             LOGGER.warning("Invalid SMARTS pattern for %s", group.name)
             continue
         hits = mol.GetSubstructMatches(pattern)
-        matches.append(FunctionalGroupMatch(group=group, match_count=len(hits)))
+        matches.append(
+            FunctionalGroupMatch(
+                group=group,
+                match_count=len(hits),
+                atom_matches=[tuple(hit) for hit in hits],
+            )
+        )
     return matches
 
 
@@ -169,7 +176,7 @@ def aggregate_group_matches(
         for match in matches:
             totals[match.group] += match.match_count
     return [
-        FunctionalGroupMatch(group=group, match_count=totals[group])
+        FunctionalGroupMatch(group=group, match_count=totals[group], atom_matches=[])
         for group in FUNCTIONAL_GROUPS
     ]
 

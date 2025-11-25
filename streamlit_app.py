@@ -20,9 +20,29 @@ def render_sidebar():
     sample_rate = st.sidebar.select_slider(
         "Sample rate", options=[22050, 32000, 44100], value=44100
     )
+    mapping_mode = st.sidebar.selectbox(
+        "Audio mapping",
+        options=["Wide (unwrapped, 100–4000 Hz)", "Musical (wrapped midrange)"],
+        help="Choose a wider, spacing-preserving band or a wrapped midrange for smoother tone.",
+    )
+    if mapping_mode.startswith("Wide"):
+        mapping_config = {
+            "audible_range": (100.0, 4000.0),
+            "wrap": False,
+            "wrap_band": (110.0, 880.0),
+            "label": "Wide",
+        }
+    else:
+        mapping_config = {
+            "audible_range": (220.0, 1760.0),
+            "wrap": True,
+            "wrap_band": (110.0, 880.0),
+            "label": "Musical",
+        }
     return {
         "duration": duration,
         "sample_rate": sample_rate,
+        "mapping_config": mapping_config,
     }
 
 
@@ -36,6 +56,8 @@ def render_molecule_info(info: chem_utils.MoleculeInfo):
             f"**Canonical SMILES:** `{info.smiles}`\n\n"
             f"**Formula:** {info.formula}"
         )
+
+
 
 
 def render_ftir_table(
@@ -67,10 +89,22 @@ def render_audio_section(
     duration: float,
     sample_rate: int,
     heading: str = "Molecular soundscape",
+    mapping_config: Optional[Dict[str, object]] = None,
 ):
     st.subheader(heading)
+    mapping_config = mapping_config or {
+        "audible_range": (100.0, 4000.0),
+        "wrap": False,
+        "wrap_band": (110.0, 880.0),
+        "label": "Wide",
+    }
     present_matches = [m for m in matches if m.present]
-    components = audio_utils.groups_to_audio_components(present_matches)
+    components = audio_utils.groups_to_audio_components(
+        present_matches,
+        audible_range=mapping_config["audible_range"],  # type: ignore[arg-type]
+        wrap=bool(mapping_config.get("wrap", False)),
+        wrap_band=mapping_config.get("wrap_band", (110.0, 880.0)),  # type: ignore[arg-type]
+    )
     if not components:
         st.info("No functional groups detected for audio synthesis.")
         return None
@@ -81,12 +115,17 @@ def render_audio_section(
     )
     # Compute per-match frequencies and contributions so the table columns stay aligned
     total_occurrences = sum(m.match_count for m in present_matches) or 1
-    display_frequencies = [
-        audio_utils._wrap_frequency_to_band(  # type: ignore[attr-defined]
-            audio_utils.map_wavenumber_to_audible(m.group.center_wavenumber)
+    def _map_freq(wn: float) -> float:
+        freq = audio_utils.map_wavenumber_to_audible(
+            wn, audible_range=mapping_config["audible_range"]  # type: ignore[arg-type]
         )
-        for m in present_matches
-    ]
+        if mapping_config.get("wrap", False):
+            freq = audio_utils._wrap_frequency_to_band(  # type: ignore[attr-defined]
+                freq, low=mapping_config.get("wrap_band", (110.0, 880.0))[0], high=mapping_config.get("wrap_band", (110.0, 880.0))[1]
+            )
+        return freq
+
+    display_frequencies = [_map_freq(m.group.center_wavenumber) for m in present_matches]
     contributions = [
         f"{(m.match_count / total_occurrences) * 100:.1f}" for m in present_matches
     ]
@@ -100,6 +139,19 @@ def render_audio_section(
         }
     )
     st.dataframe(freq_table, hide_index=True)
+    with st.expander("How are FTIR wavenumbers mapped to audio?"):
+        aud_min, aud_max = mapping_config["audible_range"]  # type: ignore[index]
+        wrap_note = (
+            f"wrapped into {mapping_config.get('wrap_band', (110.0, 880.0))[0]:.0f}–"
+            f"{mapping_config.get('wrap_band', (110.0, 880.0))[1]:.0f} Hz for a smoother band."
+            if mapping_config.get("wrap", False)
+            else "unwrapped to preserve spacing."
+        )
+        st.markdown(
+            f"- Current mode: {mapping_config.get('label', 'Wide')} — map 400–4000 cm⁻¹ linearly to"
+            f" {aud_min:.0f}–{aud_max:.0f} Hz, {wrap_note}\n"
+            "- A physical conversion (`ν = wavenumber × c`) would land in the 10¹³–10¹⁴ Hz infrared range, far above hearing; raw use would alias. The mapping is intentionally musical/educational."
+        )
 
     waveform = audio_utils.generate_waveform(
         components, duration=duration, sample_rate=sample_rate
@@ -151,6 +203,7 @@ def main():
     inputs = render_sidebar()
     duration = inputs["duration"]
     sample_rate = inputs["sample_rate"]
+    mapping_config = inputs["mapping_config"]
 
     if "smiles_input" not in st.session_state:
         st.session_state["smiles_input"] = "CCO"
@@ -185,13 +238,20 @@ def main():
 
     matches = chem_utils.find_functional_groups(info.mol)
     render_ftir_table(matches)
-    audio_context = render_audio_section(matches, duration, sample_rate)
+    audio_context = render_audio_section(
+        matches,
+        duration,
+        sample_rate,
+        mapping_config=mapping_config,
+    )
     if audio_context is not None:
         piano_roll_ui.render_piano_roll_section(
             info=info,
             components=audio_context["components"],
             duration=duration,
             sample_rate=sample_rate,
+            matches=audio_context["matches"],
+            mapping_config=mapping_config,
         )
 
 
