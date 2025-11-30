@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import pandas as pd
 import streamlit as st
@@ -44,6 +44,79 @@ def render_sidebar():
         "sample_rate": sample_rate,
         "mapping_config": mapping_config,
     }
+
+
+HISTORY_LIMIT = 5
+
+
+def _history_state() -> List[str]:
+    if "smiles_history" not in st.session_state:
+        st.session_state["smiles_history"] = []
+    return st.session_state["smiles_history"]
+
+
+def _remember_smiles(smiles: str):
+    history = _history_state()
+    cleaned = smiles.strip()
+    if not cleaned:
+        return
+    if cleaned in history:
+        history.remove(cleaned)
+    history.insert(0, cleaned)
+    del history[HISTORY_LIMIT:]
+
+
+def _set_ketcher_value(smiles: str):
+    smiles = smiles.strip()
+    current = st.session_state.get("ketcher_value", "")
+    if smiles == current:
+        return
+    st.session_state["ketcher_value"] = smiles
+    st.session_state["ketcher_value_version"] = (
+        st.session_state.get("ketcher_value_version", 0) + 1
+    )
+
+
+def _ensure_ketcher_defaults():
+    if "ketcher_value" not in st.session_state:
+        st.session_state["ketcher_value"] = st.session_state.get("smiles_input", "")
+    st.session_state.setdefault("ketcher_value_version", 0)
+
+
+def _on_smiles_change():
+    _set_ketcher_value(st.session_state.get("smiles_input", ""))
+
+
+def render_history():
+    history = _history_state()
+    if not history:
+        return
+    st.caption("Recent molecules:")
+    cols = st.columns(min(len(history), 4))
+    for idx, smiles in enumerate(history):
+        with cols[idx % len(cols)]:
+            if st.button(smiles, key=f"history_{smiles}"):
+                st.session_state["smiles_input_pending"] = smiles
+                st.rerun()
+
+
+PRESET_MOLECULES = [
+    {"name": "Ethanol", "smiles": "CCO", "tag": "Alcohol"},
+    {"name": "Benzene", "smiles": "c1ccccc1", "tag": "Aromatic"},
+    {"name": "Aspirin", "smiles": "CC(=O)Oc1ccccc1C(=O)O", "tag": "Drug"},
+    {"name": "Caffeine", "smiles": "Cn1cnc2c1c(=O)n(C)c(=O)n2C", "tag": "Stimulant"},
+]
+
+
+def render_presets():
+    st.caption("Quick-start with a known molecule:")
+    cols = st.columns(len(PRESET_MOLECULES))
+    for idx, preset in enumerate(PRESET_MOLECULES):
+        with cols[idx]:
+            label = f"{preset['name']}" if not preset.get("tag") else f"{preset['name']} · {preset['tag']}"
+            if st.button(label, key=f"preset_{preset['name']}"):
+                st.session_state["smiles_input_pending"] = preset["smiles"]
+                st.rerun()
 
 
 def render_molecule_info(info: chem_utils.MoleculeInfo):
@@ -180,8 +253,8 @@ def render_ketcher_editor(initial_smiles: str, *, key: str):
     """Render the Ketcher drawing widget when available."""
     if st_ketcher is None:
         st.info(
-            "Install `streamlit-ketcher` to enable the interactive drawing tool."
-            " Falling back to manual SMILES entry."
+            "Optional: install `streamlit-ketcher` to enable the interactive drawing tool."
+            " For now, use the SMILES field above."
         )
         return None
 
@@ -209,19 +282,35 @@ def main():
         st.session_state["smiles_input"] = "CCO"
     if "smiles_input_pending" in st.session_state:
         st.session_state["smiles_input"] = st.session_state.pop("smiles_input_pending")
+        _set_ketcher_value(st.session_state["smiles_input"])
+
+    _ensure_ketcher_defaults()
 
     st.subheader("Molecule input")
-    st.text_input("SMILES string", key="smiles_input")
+    st.markdown("Use a SMILES string or a common name/CID. Presets and history below help you explore quickly.")
+    st.text_input(
+        "SMILES string",
+        key="smiles_input",
+        on_change=_on_smiles_change,
+    )
     st.caption("Paste a SMILES string or draw the molecule below to generate audio.")
+    render_presets()
+    render_history()
 
     drawn_smiles = render_ketcher_editor(
-        st.session_state["smiles_input"], key="ketcher_editor"
+        st.session_state.get("ketcher_value", st.session_state["smiles_input"]),
+        key=f"ketcher_editor_{st.session_state.get('ketcher_value_version', 0)}",
     )
     if isinstance(drawn_smiles, str):
         updated_smiles = drawn_smiles.strip()
         if updated_smiles and updated_smiles != st.session_state["smiles_input"]:
-            st.session_state["smiles_input_pending"] = updated_smiles
-            st.rerun()
+            st.info(
+                "Drawing differs from the text input. Use the button below to apply the drawn structure."
+            )
+            if st.button("Replace SMILES with drawing", key="apply_drawn_smiles"):
+                st.session_state["smiles_input_pending"] = updated_smiles
+                _set_ketcher_value(updated_smiles)
+                st.rerun()
 
     query = st.session_state["smiles_input"].strip()
     if not query:
@@ -229,30 +318,47 @@ def main():
         st.stop()
 
     try:
-        info = chem_utils.resolve_molecule(query)
+        with st.spinner("Resolving molecule and building FTIR map..."):
+            info = chem_utils.resolve_molecule(query)
     except chem_utils.MoleculeResolutionError as exc:
         st.error(str(exc))
         st.stop()
 
-    render_molecule_info(info)
+    _remember_smiles(info.smiles)
 
     matches = chem_utils.find_functional_groups(info.mol)
-    render_ftir_table(matches)
-    audio_context = render_audio_section(
-        matches,
-        duration,
-        sample_rate,
-        mapping_config=mapping_config,
+
+    overview_tab, ftir_tab, sound_tab, arrange_tab = st.tabs(
+        ["Overview", "FTIR features", "Soundscape", "Arrange"]
     )
-    if audio_context is not None:
-        piano_roll_ui.render_piano_roll_section(
-            info=info,
-            components=audio_context["components"],
-            duration=duration,
-            sample_rate=sample_rate,
-            matches=audio_context["matches"],
+
+    with overview_tab:
+        render_molecule_info(info)
+
+    with ftir_tab:
+        render_ftir_table(matches)
+
+    audio_context = None
+    with sound_tab:
+        audio_context = render_audio_section(
+            matches,
+            duration,
+            sample_rate,
             mapping_config=mapping_config,
         )
+
+    with arrange_tab:
+        if audio_context is not None:
+            piano_roll_ui.render_piano_roll_section(
+                info=info,
+                components=audio_context["components"],
+                duration=duration,
+                sample_rate=sample_rate,
+                matches=audio_context["matches"],
+                mapping_config=mapping_config,
+            )
+        else:
+            st.info("Add a molecule to generate components for the arranger.")
 
 
 if __name__ == "__main__":

@@ -115,9 +115,13 @@ def resolve_molecule(query: str) -> MoleculeInfo:
 
 
 def get_molecule_image(mol: Chem.Mol, size: int = 300):
-    """Return a PIL image representing ``mol``."""
+    """Return a PIL image representing ``mol``.
 
-    return Draw.MolToImage(mol, size=(size, size))
+    Render with kekulization so aromatic rings show alternating double bonds
+    instead of a circle, matching typical textbook depictions.
+    """
+
+    return Draw.MolToImage(mol, size=(size, size), kekulize=True)
 
 
 @dataclass

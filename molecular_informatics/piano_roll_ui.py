@@ -1,6 +1,7 @@
 """Streamlit UI helpers for the piano roll arranger."""
 from __future__ import annotations
 
+import copy
 import io
 import uuid
 from typing import Any, Dict, List, Optional
@@ -148,6 +149,7 @@ def _build_piano_roll_figure(
     *,
     render_length: Optional[float],
     bar_length: Optional[float],
+    grid_step: Optional[float] = None,
 ):
     if not events:
         return None
@@ -214,15 +216,32 @@ def _build_piano_roll_figure(
                     x1=bar_line,
                     y0=-0.5,
                     y1=len(ordered_notes) + 0.5,
-                    line=dict(color="rgba(0,0,0,0.15)", width=1),
+                    line=dict(color="rgba(0,0,0,0.2)", width=1.5),
                     layer="below",
                 )
             )
             bar_line += bar_length
 
+        if grid_step and grid_step > 0:
+            grid_line = 0.0
+            while grid_line <= render_length:
+                shapes.append(
+                    dict(
+                        type="line",
+                        x0=grid_line,
+                        x1=grid_line,
+                        y0=-0.5,
+                        y1=len(ordered_notes) + 0.5,
+                        line=dict(color="rgba(0,0,0,0.08)", width=1),
+                        layer="below",
+                    )
+                )
+                grid_line += grid_step
+
     fig.update_layout(
         barmode="overlay",
         bargap=0.15,
+        bargroupgap=0.05,
         xaxis_title="Time (s)",
         yaxis_title="Note",
         yaxis=dict(categoryorder="array", categoryarray=ordered_notes),
@@ -258,13 +277,16 @@ def _render_track_editor(
     bar_length: float,
     grid_step_bars: float,
 ) -> Dict[str, bool]:
-    actions = {"remove": False, "preview": False}
+    actions = {"remove": False, "preview": False, "duplicate": False}
     header = f"{track.get('name', 'Track')}"
+    tag = track.get("tag", "")
+    if tag:
+        header += f" · {tag}"
     if track.get("source") == "upload" and track.get("upload_name"):
         header += f" · {track['upload_name']}"
 
     with st.expander(header, expanded=False):
-        top_cols = st.columns([1, 1, 1, 1, 1])
+        top_cols = st.columns([1, 1, 1, 1, 1, 1])
         track["is_enabled"] = top_cols[0].checkbox(
             "Active",
             value=track.get("is_enabled", True),
@@ -282,13 +304,21 @@ def _render_track_editor(
         )
         if top_cols[3].button("Preview", key=f"track_preview_{track['id']}"):
             actions["preview"] = True
-        if top_cols[4].button("Remove", key=f"track_remove_{track['id']}"):
+        if top_cols[4].button("Duplicate", key=f"track_duplicate_{track['id']}"):
+            actions["duplicate"] = True
+        if top_cols[5].button("Remove", key=f"track_remove_{track['id']}"):
             actions["remove"] = True
 
         track["name"] = st.text_input(
             "Track name",
             value=track.get("name", "Track"),
             key=f"track_name_{track['id']}",
+        )
+        track["tag"] = st.text_input(
+            "Tag/notes (optional)",
+            value=track.get("tag", ""),
+            key=f"track_tag_{track['id']}",
+            help="Add a quick label like 'pad' or 'lead'.",
         )
 
         arrange_tab, synth_tab, effects_tab = st.tabs(["Arrange", "Synth", "Effects"])
@@ -393,12 +423,143 @@ def _render_track_editor(
             else:
                 preset = st.selectbox(
                     "Tone preset",
-                    options=["Custom", "Soft pad", "Lo-fi"],
-                    index=["Custom", "Soft pad", "Lo-fi"].index(track.get("tone_preset", "Custom")),
+                    options=["Custom", "Soft pad", "Glass bell", "Crunchy lo-fi", "Drone bed"],
+                    index=["Custom", "Soft pad", "Glass bell", "Crunchy lo-fi", "Drone bed"].index(track.get("tone_preset", "Custom")),
                     key=f"track_tone_preset_{track['id']}",
-                    help="Quickly soften or texture the sound; choose Custom to dial in manually.",
+                    help="Quickly shape the oscillator and filters; choose Custom to dial in manually.",
                 )
                 track["tone_preset"] = preset
+
+                macro_cols = st.columns(4)
+                macro_labels = ["Tone", "Texture", "Space", "Movement"]
+                macro_keys = [
+                    f"macro_tone_{track['id']}",
+                    f"macro_texture_{track['id']}",
+                    f"macro_space_{track['id']}",
+                    f"macro_move_{track['id']}",
+                ]
+                macro_values = []
+                for col, label, key in zip(macro_cols, macro_labels, macro_keys):
+                    macro_values.append(
+                        col.slider(
+                            label,
+                            min_value=0.0,
+                            max_value=1.0,
+                            step=0.05,
+                            value=float(track.get(key, 0.5)),
+                            key=f"{key}_slider",
+                            help="Macro controls tweak tone/filter/reverb/delay together.",
+                        )
+                    )
+                (macro_tone, macro_texture, macro_space, macro_move) = macro_values
+                track.update(
+                    {
+                        "macro_tone": macro_tone,
+                        "macro_texture": macro_texture,
+                        "macro_space": macro_space,
+                        "macro_move": macro_move,
+                    }
+                )
+
+                # Map macros/preset into synth parameters with gentle ranges.
+                def _apply_macro_defaults():
+                    base_env = {
+                        "adsr_attack": 0.05,
+                        "adsr_decay": 0.1,
+                        "adsr_sustain_level": 0.7,
+                        "adsr_release": 0.2,
+                        "harmonic_2": 0.0,
+                        "harmonic_3": 0.0,
+                        "noise_mix": 0.0,
+                        "sub_osc": 0.0,
+                        "lowpass_cutoff": None,
+                        "reverb_wet": 0.0,
+                        "delay_mix": 0.25,
+                        "delay_seconds": None,
+                        "delay_feedback": 0.3,
+                    }
+                    track.update(base_env)
+
+                if preset != "Custom":
+                    _apply_macro_defaults()
+                    if preset == "Soft pad":
+                        track.update(
+                            {
+                                "waveform_shape": "sine",
+                                "harmonic_2": 0.15,
+                                "harmonic_3": 0.05,
+                                "adsr_attack": 0.2,
+                                "adsr_release": 0.6,
+                                "reverb_wet": 0.25,
+                                "reverb_size": 0.6,
+                                "reverb_decay": 0.7,
+                                "delay_mix": 0.1,
+                                "lowpass_cutoff": 2200.0,
+                            }
+                        )
+                    elif preset == "Glass bell":
+                        track.update(
+                            {
+                                "waveform_shape": "sine",
+                                "harmonic_2": 0.35,
+                                "harmonic_3": 0.15,
+                                "adsr_attack": 0.01,
+                                "adsr_decay": 0.25,
+                                "adsr_sustain_level": 0.4,
+                                "adsr_release": 0.35,
+                                "reverb_wet": 0.3,
+                                "reverb_size": 0.4,
+                                "reverb_decay": 0.5,
+                                "delay_mix": 0.2,
+                                "delay_seconds": 0.22,
+                            }
+                        )
+                    elif preset == "Crunchy lo-fi":
+                        track.update(
+                            {
+                                "waveform_shape": "square",
+                                "harmonic_2": 0.0,
+                                "harmonic_3": 0.2,
+                                "noise_mix": 0.25,
+                                "adsr_attack": 0.02,
+                                "adsr_decay": 0.08,
+                                "adsr_sustain_level": 0.6,
+                                "adsr_release": 0.15,
+                                "delay_mix": 0.15,
+                                "delay_seconds": 0.28,
+                                "lowpass_cutoff": 3200.0,
+                            }
+                        )
+                    elif preset == "Drone bed":
+                        track.update(
+                            {
+                                "waveform_shape": "sine",
+                                "sub_osc": 0.35,
+                                "harmonic_2": 0.05,
+                                "harmonic_3": 0.05,
+                                "adsr_attack": 0.4,
+                                "adsr_decay": 0.4,
+                                "adsr_sustain_level": 0.9,
+                                "adsr_release": 1.2,
+                                "drone_mode": True,
+                                "reverb_wet": 0.35,
+                                "reverb_size": 0.7,
+                                "reverb_decay": 0.85,
+                                "lowpass_cutoff": 1800.0,
+                            }
+                        )
+
+                # Macro application: nudge key parameters while respecting presets.
+                track["lowpass_cutoff"] = (
+                    800.0 + macro_tone * 3200.0 if track.get("lowpass_cutoff") is None else track["lowpass_cutoff"]
+                )
+                track["harmonic_2"] = min(0.6, max(0.0, track.get("harmonic_2", 0.0) + (macro_texture - 0.5) * 0.4))
+                track["noise_mix"] = min(0.6, max(0.0, track.get("noise_mix", 0.0) + (macro_texture - 0.5) * 0.3))
+                track["reverb_wet"] = min(0.6, max(0.0, track.get("reverb_wet", 0.0) + macro_space * 0.3))
+                if macro_move > 0.6:
+                    track["delay_mix"] = min(0.5, track.get("delay_mix", 0.25) + (macro_move - 0.6) * 0.6)
+                    track["delay_seconds"] = track.get("delay_seconds") or 0.25
+                track["detune"] = (macro_move - 0.5) * 20.0
 
                 track["waveform_shape"] = st.selectbox(
                     "Oscillator",
@@ -771,7 +932,13 @@ def render_piano_roll_section(
 
     settings_state = st.session_state.setdefault(
         "piano_roll_settings",
-        {"bar_count": 1, "render_length": duration, "grid_step_bars": 0.25},
+        {
+            "bar_count": 1,
+            "render_length": duration,
+            "grid_step_bars": 0.25,
+            "tempo_bpm": 90,
+            "swing": 0.0,
+        },
     )
 
     base_clip_length = duration
@@ -779,13 +946,28 @@ def render_piano_roll_section(
         base_clip_length = float(tracks[0].get("duration", duration) or duration)
     base_clip_length = max(base_clip_length, 0.1)
 
+    tempo_bpm = st.slider(
+        "Tempo (BPM)",
+        min_value=40,
+        max_value=180,
+        value=int(settings_state.get("tempo_bpm", 90)),
+        step=1,
+        help="Sets bar length for grid snapping and timing cues.",
+        key="piano_roll_tempo",
+    )
+    settings_state["tempo_bpm"] = tempo_bpm
+    seconds_per_beat = 60.0 / tempo_bpm
+    beats_per_bar = 4.0
+    # Keep bar length aligned to tempo but never shorter than the base clip duration
+    base_clip_length = max(beats_per_bar * seconds_per_beat, base_clip_length)
+
     bar_count = st.slider(
-        "Arrangement bars (multiples of clip length)",
+        "Arrangement bars (4/4)",
         min_value=1,
         max_value=64,
         value=int(settings_state.get("bar_count", 1)),
         step=1,
-        help="Each bar repeats the base clip length. Tracks in continuous mode will loop to fill this time.",
+        help="Each bar is 4 beats. Tracks in continuous mode will loop to fill this time.",
         key="piano_roll_bar_count",
     )
     arrangement_length = base_clip_length * bar_count
@@ -803,9 +985,20 @@ def render_piano_roll_section(
     settings_state["grid_step_bars"] = float(grid_step_bars)
     st.caption(
         f"Current length: {arrangement_length:.2f}s"
-        f" (clip {base_clip_length:.2f}s × {bar_count} bars)."
+        f" (bar {base_clip_length:.2f}s @ {tempo_bpm} BPM × {bar_count} bars)."
         " Tracks default to continuous looping so you hear the clip repeat across bars."
     )
+
+    swing = st.slider(
+        "Swing (rhythmic shuffle)",
+        min_value=0.0,
+        max_value=0.2,
+        step=0.01,
+        value=float(settings_state.get("swing", 0.0)),
+        help="Pushes every second grid step later for a swung feel.",
+        key="piano_roll_swing",
+    )
+    settings_state["swing"] = swing
 
     add_cols = st.columns([2, 1, 1])
     with add_cols[0]:
@@ -875,6 +1068,7 @@ def render_piano_roll_section(
 
     pending_preview: Optional[str] = None
     removal_ids: List[str] = []
+    duplicate_payloads: List[Dict[str, Any]] = []
 
     for track in list(tracks):
         # Ensure bar gating defaults exist
@@ -891,6 +1085,13 @@ def render_piano_roll_section(
             removal_ids.append(track["id"])
         if actions["preview"]:
             pending_preview = track["id"]
+        if actions.get("duplicate"):
+            clone = copy.deepcopy(track)
+            clone["id"] = uuid.uuid4().hex
+            clone["name"] = f"{track.get('name', 'Track')} copy"
+            clone["is_muted"] = False
+            clone["is_solo"] = False
+            duplicate_payloads.append(clone)
 
     if removal_ids:
         st.session_state["piano_roll_tracks"] = [
@@ -898,8 +1099,31 @@ def render_piano_roll_section(
         ]
         tracks = _tracks_state()
 
+    if duplicate_payloads:
+        _tracks_state().extend(duplicate_payloads)
+        tracks = _tracks_state()
+
+    grid_step_seconds = base_clip_length * float(grid_step_bars)
+
+    def _apply_groove(start: float) -> float:
+        if grid_step_seconds <= 0:
+            return max(0.0, start)
+        quantized = round(start / grid_step_seconds) * grid_step_seconds
+        step_idx = int(round(quantized / grid_step_seconds))
+        swing_amount = float(settings_state.get("swing", 0.0) or 0.0)
+        if swing_amount > 0 and step_idx % 2 == 1:
+            quantized += swing_amount * grid_step_seconds
+        quantized = max(0.0, quantized)
+        if arrangement_length:
+            quantized = min(quantized, max(0.0, arrangement_length - 0.01))
+        return quantized
+
+    tracks_for_render = copy.deepcopy(tracks)
+    for t in tracks_for_render:
+        t["start_time"] = _apply_groove(float(t.get("start_time", 0.0) or 0.0))
+
     arrangement = piano_roll.build_arrangement(
-        tracks,
+        tracks_for_render,
         sample_rate=sample_rate,
         render_length=arrangement_length,
         bar_length=base_clip_length,
@@ -975,6 +1199,7 @@ def render_piano_roll_section(
         events,
         render_length=arrangement_length,
         bar_length=base_clip_length,
+        grid_step=float(grid_step_seconds) if grid_step_seconds else None,
     )
     if figure is not None:
         st.plotly_chart(figure, use_container_width=True)

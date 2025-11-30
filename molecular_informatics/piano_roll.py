@@ -490,35 +490,25 @@ def build_arrangement(
 
         start_time = float(track.get("start_time", 0.0) or 0.0)
 
-        # Apply bar-based gating so effects can live in selected bars only.
+        # Apply bar-based gating: only include audio within the selected bars.
         bar_start = int(track.get("bar_start", 1) or 1)
         bar_end = int(track.get("bar_end", bar_start) or bar_start)
         track_start = start_time
         track_end = track_start + len(processed) / sample_rate
 
-        # Always include a dry layer; effects are injected only inside the active bar window.
         if bar_length and bar_end >= bar_start:
             active_start = (bar_start - 1) * bar_length
             active_end = bar_end * bar_length
             overlap_start = max(track_start, active_start)
             overlap_end = min(track_end, active_end)
 
-            # Dry before the active window
-            if overlap_start > track_start:
-                dry_before_end_idx = int(round((overlap_start - track_start) * sample_rate))
-                segments.append((dry_waveform[:dry_before_end_idx], track_start))
+            if overlap_end <= overlap_start:
+                continue
 
-            # Wet inside the active window
-            if overlap_end > overlap_start:
-                wet_start_idx = int(round((overlap_start - track_start) * sample_rate))
-                wet_end_idx = int(round((overlap_end - track_start) * sample_rate))
-                wet_slice = processed[wet_start_idx:wet_end_idx]
-                segments.append((wet_slice, overlap_start))
-
-            # Dry after the active window
-            if overlap_end < track_end:
-                dry_after_start_idx = int(round((overlap_end - track_start) * sample_rate))
-                segments.append((dry_waveform[dry_after_start_idx:], overlap_end))
+            wet_start_idx = int(round((overlap_start - track_start) * sample_rate))
+            wet_end_idx = int(round((overlap_end - track_start) * sample_rate))
+            wet_slice = processed[wet_start_idx:wet_end_idx]
+            segments.append((wet_slice, overlap_start))
         else:
             # No bar gating: use the effected signal throughout.
             segments.append((processed, track_start))
@@ -544,6 +534,7 @@ def build_arrangement(
                 "Length (s)": f"{rendered_length:.2f}",
                 "Gain (dB)": f"{float(track.get('gain_db', 0.0) or 0.0):+.1f}",
                 "Bars": f"{bar_start}–{bar_end}" if bar_length else "all",
+                "Tag": track.get("tag", ""),
             }
         )
 
