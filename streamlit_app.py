@@ -101,10 +101,10 @@ def render_history():
 
 
 PRESET_MOLECULES = [
-    {"name": "Ethanol", "smiles": "CCO", "tag": "Alcohol"},
-    {"name": "Benzene", "smiles": "c1ccccc1", "tag": "Aromatic"},
-    {"name": "Aspirin", "smiles": "CC(=O)Oc1ccccc1C(=O)O", "tag": "Drug"},
-    {"name": "Caffeine", "smiles": "Cn1cnc2c1c(=O)n(C)c(=O)n2C", "tag": "Stimulant"},
+    {"name": "Ethanol", "smiles": "CCO"},
+    {"name": "Benzene", "smiles": "c1ccccc1"},
+    {"name": "Aspirin", "smiles": "CC(=O)Oc1ccccc1C(=O)O"},
+    {"name": "Caffeine", "smiles": "Cn1cnc2c1c(=O)n(C)c(=O)n2C"},
 ]
 
 
@@ -113,7 +113,7 @@ def render_presets():
     cols = st.columns(len(PRESET_MOLECULES))
     for idx, preset in enumerate(PRESET_MOLECULES):
         with cols[idx]:
-            label = f"{preset['name']}" if not preset.get("tag") else f"{preset['name']} · {preset['tag']}"
+            label = f"{preset['name']}"
             if st.button(label, key=f"preset_{preset['name']}"):
                 st.session_state["smiles_input_pending"] = preset["smiles"]
                 st.rerun()
@@ -265,6 +265,7 @@ def render_ketcher_editor(initial_smiles: str, *, key: str):
         return None
 
 
+
 def main():
     st.set_page_config(page_title="Molecular FTIR Sound Generator", layout="wide")
     st.title("Molecular FTIR Sound Generator")
@@ -359,7 +360,6 @@ def main():
             )
         else:
             st.info("Add a molecule to generate components for the arranger.")
-
 
 if __name__ == "__main__":
     main()

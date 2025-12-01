@@ -137,19 +137,6 @@ class FunctionalGroupMatch:
         return self.match_count > 0
 
 
-@dataclass
-class FunctionalGroupDelta:
-    """Net change of a functional group across reaction participants."""
-
-    group: FunctionalGroup
-    reactant_count: int
-    product_count: int
-
-    @property
-    def delta(self) -> int:
-        return self.product_count - self.reactant_count
-
-
 def find_functional_groups(mol: Chem.Mol) -> List[FunctionalGroupMatch]:
     """Find functional groups defined in :mod:`molecular_informatics.ftir_data`."""
 
@@ -183,28 +170,6 @@ def aggregate_group_matches(
         FunctionalGroupMatch(group=group, match_count=totals[group], atom_matches=[])
         for group in FUNCTIONAL_GROUPS
     ]
-
-
-def compute_group_deltas(
-    reactant_matches: Iterable[FunctionalGroupMatch],
-    product_matches: Iterable[FunctionalGroupMatch],
-) -> List[FunctionalGroupDelta]:
-    """Compute per-functional-group changes between reactants and products."""
-
-    reactant_lookup = {match.group: match.match_count for match in reactant_matches}
-    product_lookup = {match.group: match.match_count for match in product_matches}
-    deltas: List[FunctionalGroupDelta] = []
-    for group in FUNCTIONAL_GROUPS:
-        reactant_count = reactant_lookup.get(group, 0)
-        product_count = product_lookup.get(group, 0)
-        deltas.append(
-            FunctionalGroupDelta(
-                group=group,
-                reactant_count=reactant_count,
-                product_count=product_count,
-            )
-        )
-    return deltas
 
 
 def summarise_groups(matches: Iterable[FunctionalGroupMatch]) -> List[Dict[str, str]]:

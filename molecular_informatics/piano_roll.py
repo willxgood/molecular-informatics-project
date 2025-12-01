@@ -279,7 +279,7 @@ def build_track_waveform(
     source = track.get("source", "components")
     duration = float(track.get("duration", 1.0))
 
-    if source == "upload" and track.get("audio_bytes"):
+    if source in ("upload", "drum") and track.get("audio_bytes"):
         waveform = _decode_wav_bytes(
             track["audio_bytes"],
             target_sample_rate=sample_rate,

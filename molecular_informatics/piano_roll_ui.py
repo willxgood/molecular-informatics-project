@@ -127,6 +127,144 @@ def _read_uploaded_clip(file) -> Optional[Dict[str, Any]]:
     }
 
 
+def _synth_drum_loop(
+    loop_bars: int,
+    tempo_bpm: float,
+    swing: float,
+    sample_rate: int,
+    pattern: str = "basic",
+    *,
+    kick_level: float = 1.0,
+    snare_level: float = 1.0,
+    hat_level: float = 1.0,
+    humanize_ms: float = 0.0,
+    master_gain: float = 1.0,
+) -> Dict[str, Any]:
+    """Generate a lightweight synthetic drum loop (kick/snare/hat) with swing applied."""
+
+    loop_bars = max(1, int(loop_bars))
+    seconds_per_beat = 60.0 / max(tempo_bpm, 1.0)
+    beats_per_bar = 4.0
+    loop_length = loop_bars * beats_per_bar * seconds_per_beat
+    total_samples = int(loop_length * sample_rate)
+    if total_samples <= 0:
+        return {"bytes": b"", "sample_rate": sample_rate, "duration": 0.0, "name": "drums.wav"}
+
+    waveform = np.zeros(total_samples, dtype=np.float32)
+
+    def _add_pulse(start_time: float, shape: str):
+        jitter = 0.0
+        if humanize_ms > 0:
+            jitter = np.random.uniform(-humanize_ms, humanize_ms) / 1000.0
+        start_time += jitter
+        if start_time < 0:
+            start_time = 0.0
+        start_idx = int(start_time * sample_rate)
+        if start_idx >= total_samples:
+            return
+        if shape == "kick":
+            length = int(0.3 * sample_rate)
+            t = np.linspace(0, 0.3, length, endpoint=False)
+            env = np.exp(-t * 9.0)
+            sig = np.sin(2 * np.pi * 60.0 * t) * env * float(kick_level)
+        elif shape == "snare":
+            length = int(0.22 * sample_rate)
+            t = np.linspace(0, 0.22, length, endpoint=False)
+            env = np.exp(-t * 12.0)
+            noise = np.random.uniform(-1.0, 1.0, size=length) * env
+            sig = noise * 0.65 * float(snare_level)
+        else:  # hat
+            length = int(0.1 * sample_rate)
+            t = np.linspace(0, 0.1, length, endpoint=False)
+            env = np.exp(-t * 18.0)
+            noise = np.random.uniform(-1.0, 1.0, size=length) * env
+            sig = noise * 0.38 * float(hat_level)
+
+        # Trim if start is near the end to avoid zero-length slices
+        sig_len = len(sig)
+        if start_idx + sig_len <= 0:
+            return
+        if start_idx < 0:
+            sig = sig[-start_idx:]
+            start_idx = 0
+        end_idx = min(total_samples, start_idx + len(sig))
+        if end_idx <= start_idx:
+            return
+        waveform[start_idx:end_idx] += sig[: end_idx - start_idx]
+
+    def _swing_time(base_time: float, step_index: int, division: float) -> float:
+        # Swing every second subdivision
+        if swing <= 0:
+            return base_time
+        if step_index % 2 == 1:
+            return base_time + swing * division * seconds_per_beat
+        return base_time
+
+    patterns = {
+        "basic": {
+            "kicks": [0.0, 2.0],
+            "snares": [1.0, 3.0],
+            "hats": [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5],
+        },
+        "four_on_floor": {
+            "kicks": [0.0, 1.0, 2.0, 3.0],
+            "snares": [1.0, 3.0],
+            "hats": [i * 0.25 for i in range(16)],
+        },
+        "halftime": {
+            "kicks": [0.0],
+            "snares": [2.0],
+            "hats": [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5],
+        },
+        "syncopated": {
+            "kicks": [0.0, 1.5, 2.5],
+            "snares": [1.0, 3.5],
+            "hats": [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5],
+        },
+        "two_step": {
+            "kicks": [0.0, 1.75, 3.0],
+            "snares": [2.0],
+            "hats": [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5],
+        },
+        "trap": {
+            "kicks": [0.0, 1.5, 2.0, 3.25],
+            "snares": [1.5, 3.0],
+            "hats": [i * 0.25 for i in range(16)],
+        },
+    }
+
+    def _swing_time(base_beats: float) -> float:
+        base_time = base_beats * seconds_per_beat
+        if swing <= 0:
+            return base_time
+        # Swing eighths (0.5 beat offsets): push every second 8th later
+        if abs((base_beats * 2) - round(base_beats * 2)) < 1e-6:
+            idx = int(round(base_beats * 2))
+            if idx % 2 == 1:
+                base_time += swing * 0.5 * seconds_per_beat
+        return base_time
+
+    pat = patterns.get(pattern, patterns["basic"])
+
+    for bar in range(loop_bars):
+        offset = bar * beats_per_bar
+        for k in pat["kicks"]:
+            _add_pulse(_swing_time(offset + k), "kick")
+        for s in pat["snares"]:
+            _add_pulse(_swing_time(offset + s), "snare")
+        for h in pat["hats"]:
+            _add_pulse(_swing_time(offset + h), "hat")
+
+    waveform = np.clip(waveform, -1.0, 1.0) * float(master_gain) * 0.9
+    wav_bytes = audio_utils.waveform_to_wav_bytes(waveform, sample_rate=sample_rate)
+    return {
+        "bytes": wav_bytes,
+        "sample_rate": sample_rate,
+        "duration": loop_length,
+        "name": f"Drums_{pattern}_{loop_bars}bar_{int(tempo_bpm)}bpm.wav",
+    }
+
+
 def _add_uploaded_track(payload: Dict[str, Any]):
     track = _default_track_payload(
         name=payload.get("name", "Clip"),
@@ -139,6 +277,24 @@ def _add_uploaded_track(payload: Dict[str, Any]):
             "audio_bytes": payload.get("bytes"),
             "upload_sample_rate": payload.get("sample_rate"),
             "upload_name": payload.get("name"),
+        }
+    )
+    _tracks_state().append(track)
+
+
+def _add_drum_track(payload: Dict[str, Any], settings: Dict[str, Any]):
+    track = _default_track_payload(
+        name=payload.get("name", "Drums"),
+        duration=max(payload.get("duration", 0.0), 0.1),
+        components=[],
+    )
+    track.update(
+        {
+            "source": "drum",
+            "audio_bytes": payload.get("bytes"),
+            "upload_sample_rate": payload.get("sample_rate"),
+            "upload_name": payload.get("name", "Drums"),
+            "drum_settings": settings,
         }
     )
     _tracks_state().append(track)
@@ -276,8 +432,11 @@ def _render_track_editor(
     bar_count: int,
     bar_length: float,
     grid_step_bars: float,
+    quantized_start: Optional[float] = None,
+    tempo_bpm: Optional[float] = None,
+    swing: Optional[float] = None,
 ) -> Dict[str, bool]:
-    actions = {"remove": False, "preview": False, "duplicate": False}
+    actions = {"remove": False, "preview": False, "duplicate": False, "duplicate_shifted": False, "regen_drum": False}
     header = f"{track.get('name', 'Track')}"
     tag = track.get("tag", "")
     if tag:
@@ -286,7 +445,7 @@ def _render_track_editor(
         header += f" · {track['upload_name']}"
 
     with st.expander(header, expanded=False):
-        top_cols = st.columns([1, 1, 1, 1, 1, 1])
+        top_cols = st.columns([1, 1, 1, 1, 1, 1, 1])
         track["is_enabled"] = top_cols[0].checkbox(
             "Active",
             value=track.get("is_enabled", True),
@@ -306,7 +465,9 @@ def _render_track_editor(
             actions["preview"] = True
         if top_cols[4].button("Duplicate", key=f"track_duplicate_{track['id']}"):
             actions["duplicate"] = True
-        if top_cols[5].button("Remove", key=f"track_remove_{track['id']}"):
+        if top_cols[5].button("Dup +1 bar", key=f"track_duplicate_shift_{track['id']}"):
+            actions["duplicate_shifted"] = True
+        if top_cols[6].button("Remove", key=f"track_remove_{track['id']}"):
             actions["remove"] = True
 
         track["name"] = st.text_input(
@@ -320,6 +481,8 @@ def _render_track_editor(
             key=f"track_tag_{track['id']}",
             help="Add a quick label like 'pad' or 'lead'.",
         )
+        if quantized_start is not None:
+            st.caption(f"Quantized start @ swing/grid: {quantized_start:.2f}s")
 
         arrange_tab, synth_tab, effects_tab = st.tabs(["Arrange", "Synth", "Effects"])
 
@@ -416,6 +579,61 @@ def _render_track_editor(
                     f"Uploaded clip @ {int(track['upload_sample_rate'])} Hz"
                     f" · {track.get('duration', 0.0):.2f} s"
                 )
+            if track.get("source") == "drum" and track.get("drum_settings"):
+                ds = track.get("drum_settings", {})
+                st.caption(
+                    f"Drum pattern: {ds.get('pattern', 'basic')} · {ds.get('loop_bars', 1)} bars · gain {ds.get('master_gain',1.0):.1f}"
+                )
+                col_d1, col_d2 = st.columns(2)
+                pattern = col_d1.selectbox(
+                    "Pattern",
+                    options=["basic", "four_on_floor", "halftime", "syncopated", "two_step", "trap"],
+                    index=["basic", "four_on_floor", "halftime", "syncopated", "two_step", "trap"].index(ds.get("pattern", "basic")),
+                    key=f"drum_pat_{track['id']}",
+                )
+                loop_bars = col_d2.selectbox(
+                    "Bars",
+                    options=[1, 2, 4],
+                    index=[1, 2, 4].index(int(ds.get("loop_bars", 2))),
+                    key=f"drum_bars_{track['id']}",
+                )
+                mix_cols = st.columns(4)
+                kick_level = mix_cols[0].slider("Kick", 0.2, 1.5, float(ds.get("kick_level", 1.0)), 0.05, key=f"drum_kick_{track['id']}")
+                snare_level = mix_cols[1].slider("Snare", 0.2, 1.5, float(ds.get("snare_level", 1.0)), 0.05, key=f"drum_snare_{track['id']}")
+                hat_level = mix_cols[2].slider("Hat", 0.2, 1.5, float(ds.get("hat_level", 1.0)), 0.05, key=f"drum_hat_{track['id']}")
+                master_gain = mix_cols[3].slider("Gain", 0.5, 2.0, float(ds.get("master_gain", 1.3)), 0.05, key=f"drum_gain_{track['id']}")
+                humanize_ms = st.slider(
+                    "Humanize timing (ms)",
+                    min_value=0.0,
+                    max_value=25.0,
+                    value=float(ds.get("humanize_ms", 5.0)),
+                    step=1.0,
+                    key=f"drum_humanize_{track['id']}",
+                )
+                changed = any(
+                    [
+                        pattern != ds.get("pattern"),
+                        loop_bars != ds.get("loop_bars"),
+                        abs(kick_level - float(ds.get("kick_level", 1.0))) > 1e-6,
+                        abs(snare_level - float(ds.get("snare_level", 1.0))) > 1e-6,
+                        abs(hat_level - float(ds.get("hat_level", 1.0))) > 1e-6,
+                        abs(master_gain - float(ds.get("master_gain", 1.0))) > 1e-6,
+                        abs(humanize_ms - float(ds.get("humanize_ms", 5.0))) > 1e-6,
+                    ]
+                )
+                track["drum_settings"] = {
+                    "loop_bars": loop_bars,
+                    "pattern": pattern,
+                    "kick_level": kick_level,
+                    "snare_level": snare_level,
+                    "hat_level": hat_level,
+                    "humanize_ms": humanize_ms,
+                    "master_gain": master_gain,
+                    "tempo_bpm": tempo_bpm if tempo_bpm is not None else ds.get("tempo_bpm", 90),
+                    "swing": swing if swing is not None else ds.get("swing", 0.0),
+                }
+                if changed or st.button("Regenerate drum (apply settings)", key=f"regen_drum_{track['id']}"):
+                    actions["regen_drum"] = True
 
         with synth_tab:
             if track.get("source") == "upload":
@@ -430,24 +648,38 @@ def _render_track_editor(
                 )
                 track["tone_preset"] = preset
 
+                macro_choice = st.selectbox(
+                    "Macro quick-set",
+                    options=["Manual", "Brighten", "Soften", "Spacey", "Motion"],
+                    index=["Manual", "Brighten", "Soften", "Spacey", "Motion"].index(track.get("macro_choice", "Manual")),
+                    key=f"macro_choice_{track['id']}",
+                    help="Jump to a macro mix; sliders below reflect the selection.",
+                )
+                track["macro_choice"] = macro_choice
+                if macro_choice != "Manual":
+                    presets_map = {
+                        "Brighten": (0.9, 0.6, 0.25, 0.55),
+                        "Soften": (0.35, 0.45, 0.2, 0.3),
+                        "Spacey": (0.5, 0.45, 0.8, 0.35),
+                        "Motion": (0.55, 0.6, 0.35, 0.8),
+                    }
+                    macro_vals = presets_map.get(macro_choice)
+                    if macro_vals:
+                        track["macro_tone"], track["macro_texture"], track["macro_space"], track["macro_move"] = macro_vals
+
                 macro_cols = st.columns(4)
                 macro_labels = ["Tone", "Texture", "Space", "Movement"]
-                macro_keys = [
-                    f"macro_tone_{track['id']}",
-                    f"macro_texture_{track['id']}",
-                    f"macro_space_{track['id']}",
-                    f"macro_move_{track['id']}",
-                ]
+                macro_fields = ["macro_tone", "macro_texture", "macro_space", "macro_move"]
                 macro_values = []
-                for col, label, key in zip(macro_cols, macro_labels, macro_keys):
+                for col, label, field in zip(macro_cols, macro_labels, macro_fields):
                     macro_values.append(
                         col.slider(
                             label,
                             min_value=0.0,
                             max_value=1.0,
                             step=0.05,
-                            value=float(track.get(key, 0.5)),
-                            key=f"{key}_slider",
+                            value=float(track.get(field, 0.5)),
+                            key=f"{field}_{track['id']}_slider",
                             help="Macro controls tweak tone/filter/reverb/delay together.",
                         )
                     )
@@ -999,8 +1231,11 @@ def render_piano_roll_section(
         key="piano_roll_swing",
     )
     settings_state["swing"] = swing
+    st.caption(
+        f"Swing {swing*100:.0f}% applied to grid; starts quantize to {float(grid_step_bars)} bar steps with swing timing."
+    )
 
-    add_cols = st.columns([2, 1, 1])
+    add_cols = st.columns([2, 1, 2, 1])
     with add_cols[0]:
         st.markdown(
             "Layer multiple molecular clips, uploaded WAV files, and synth tweaks"
@@ -1016,6 +1251,67 @@ def render_piano_roll_section(
                 matches=matches,
             )
     with add_cols[2]:
+        drum_cols = st.columns([1, 1])
+        loop_len = drum_cols[0].selectbox(
+            "Drum length (bars)",
+            options=[1, 2, 4],
+            index=[1, 2, 4].index(2),
+            key="drum_loop_bars",
+        )
+        pattern = drum_cols[1].selectbox(
+            "Pattern",
+            options=["basic", "four_on_floor", "halftime", "syncopated", "two_step", "trap"],
+            format_func=lambda p: {
+                "basic": "Backbeat",
+                "four_on_floor": "Four on the floor",
+                "halftime": "Halftime",
+                "syncopated": "Syncopated",
+                "two_step": "2-step",
+                "trap": "Trap-ish",
+            }.get(p, p),
+            key="drum_loop_pattern",
+        )
+        mix_cols = st.columns(4)
+        kick_level = mix_cols[0].slider("Kick", 0.2, 1.5, 1.0, 0.05, key="drum_kick_level")
+        snare_level = mix_cols[1].slider("Snare", 0.2, 1.5, 1.0, 0.05, key="drum_snare_level")
+        hat_level = mix_cols[2].slider("Hat", 0.2, 1.5, 1.0, 0.05, key="drum_hat_level")
+        drum_gain = mix_cols[3].slider("Drum gain", 0.5, 2.0, 1.3, 0.05, key="drum_gain")
+        humanize_ms = st.slider(
+            "Humanize timing (ms)",
+            min_value=0.0,
+            max_value=25.0,
+            value=5.0,
+            step=1.0,
+            key="drum_humanize",
+            help="Adds tiny timing jitter to avoid robotic loops.",
+        )
+        if st.button("Add drum loop", key="pr_add_drum_loop"):
+            drum_payload = _synth_drum_loop(
+                loop_len,
+                settings_state.get("tempo_bpm", 90),
+                settings_state.get("swing", 0.0),
+                sample_rate,
+                pattern,
+                kick_level=kick_level,
+                snare_level=snare_level,
+                hat_level=hat_level,
+                humanize_ms=humanize_ms,
+                master_gain=drum_gain,
+            )
+            if drum_payload.get("bytes"):
+                drum_settings = {
+                    "loop_bars": loop_len,
+                    "pattern": pattern,
+                    "kick_level": kick_level,
+                    "snare_level": snare_level,
+                    "hat_level": hat_level,
+                    "humanize_ms": humanize_ms,
+                    "master_gain": drum_gain,
+                    "tempo_bpm": settings_state.get("tempo_bpm", 90),
+                    "swing": settings_state.get("swing", 0.0),
+                }
+                _add_drum_track(drum_payload, drum_settings)
+    with add_cols[3]:
         uploaded_file = st.file_uploader(
             "Upload WAV clip",
             type=["wav"],
@@ -1064,45 +1360,6 @@ def render_piano_roll_section(
     for track in tracks:
         _remap_track_components(track)
 
-    _render_transport_controls(tracks)
-
-    pending_preview: Optional[str] = None
-    removal_ids: List[str] = []
-    duplicate_payloads: List[Dict[str, Any]] = []
-
-    for track in list(tracks):
-        # Ensure bar gating defaults exist
-        track.setdefault("bar_start", 1)
-        track.setdefault("bar_end", bar_count)
-        actions = _render_track_editor(
-            track,
-            sample_rate=sample_rate,
-            bar_count=bar_count,
-            bar_length=base_clip_length,
-            grid_step_bars=float(grid_step_bars),
-        )
-        if actions["remove"]:
-            removal_ids.append(track["id"])
-        if actions["preview"]:
-            pending_preview = track["id"]
-        if actions.get("duplicate"):
-            clone = copy.deepcopy(track)
-            clone["id"] = uuid.uuid4().hex
-            clone["name"] = f"{track.get('name', 'Track')} copy"
-            clone["is_muted"] = False
-            clone["is_solo"] = False
-            duplicate_payloads.append(clone)
-
-    if removal_ids:
-        st.session_state["piano_roll_tracks"] = [
-            t for t in tracks if t["id"] not in removal_ids
-        ]
-        tracks = _tracks_state()
-
-    if duplicate_payloads:
-        _tracks_state().extend(duplicate_payloads)
-        tracks = _tracks_state()
-
     grid_step_seconds = base_clip_length * float(grid_step_bars)
 
     def _apply_groove(start: float) -> float:
@@ -1117,6 +1374,100 @@ def render_piano_roll_section(
         if arrangement_length:
             quantized = min(quantized, max(0.0, arrangement_length - 0.01))
         return quantized
+
+    quantized_starts: Dict[str, float] = {}
+    for t in tracks:
+        quantized_starts[t["id"]] = _apply_groove(float(t.get("start_time", 0.0) or 0.0))
+
+    _render_transport_controls(tracks)
+
+    pending_preview: Optional[str] = None
+    removal_ids: List[str] = []
+    duplicate_payloads: List[Dict[str, Any]] = []
+    duplicate_shift_payloads: List[Dict[str, Any]] = []
+
+    for track in list(tracks):
+        # Ensure bar gating defaults exist
+        track.setdefault("bar_start", 1)
+        track.setdefault("bar_end", bar_count)
+        actions = _render_track_editor(
+            track,
+            sample_rate=sample_rate,
+            bar_count=bar_count,
+            bar_length=base_clip_length,
+            grid_step_bars=float(grid_step_bars),
+            quantized_start=quantized_starts.get(track["id"]),
+            tempo_bpm=tempo_bpm,
+            swing=swing,
+        )
+        if actions["remove"]:
+            removal_ids.append(track["id"])
+        if actions["preview"]:
+            pending_preview = track["id"]
+        if actions.get("duplicate"):
+            clone = copy.deepcopy(track)
+            clone["id"] = uuid.uuid4().hex
+            clone["name"] = f"{track.get('name', 'Track')} copy"
+            clone["is_muted"] = False
+            clone["is_solo"] = False
+            duplicate_payloads.append(clone)
+        if actions.get("duplicate_shifted"):
+            clone = copy.deepcopy(track)
+            clone["id"] = uuid.uuid4().hex
+            clone["name"] = f"{track.get('name', 'Track')} copy"
+            clone["is_muted"] = False
+            clone["is_solo"] = False
+            clone["start_time"] = max(0.0, float(track.get("start_time", 0.0) or 0.0) + base_clip_length)
+            duplicate_shift_payloads.append(clone)
+        if actions.get("regen_drum"):
+            drum_settings = track.get("drum_settings", {})
+            loop_bars = int(drum_settings.get("loop_bars", 2) or 2)
+            pattern = drum_settings.get("pattern", "basic")
+            kick_level = float(drum_settings.get("kick_level", 1.0) or 1.0)
+            snare_level = float(drum_settings.get("snare_level", 1.0) or 1.0)
+            hat_level = float(drum_settings.get("hat_level", 1.0) or 1.0)
+            humanize_ms = float(drum_settings.get("humanize_ms", 5.0) or 0.0)
+            drum_payload = _synth_drum_loop(
+                loop_bars,
+                tempo_bpm if tempo_bpm is not None else drum_settings.get("tempo_bpm", 90),
+                swing if swing is not None else drum_settings.get("swing", 0.0),
+                sample_rate,
+                pattern,
+                kick_level=kick_level,
+                snare_level=snare_level,
+                hat_level=hat_level,
+                humanize_ms=humanize_ms,
+                master_gain=float(drum_settings.get("master_gain", 1.0)),
+            )
+            if drum_payload.get("bytes"):
+                track["audio_bytes"] = drum_payload.get("bytes")
+                track["upload_sample_rate"] = drum_payload.get("sample_rate")
+                track["duration"] = drum_payload.get("duration", track.get("duration", 0.1))
+                track["drum_settings"] = {
+                    "loop_bars": loop_bars,
+                    "pattern": pattern,
+                    "kick_level": kick_level,
+                    "snare_level": snare_level,
+                    "hat_level": hat_level,
+                    "humanize_ms": humanize_ms,
+                    "master_gain": float(drum_settings.get("master_gain", 1.0)),
+                    "tempo_bpm": tempo_bpm if tempo_bpm is not None else drum_settings.get("tempo_bpm", 90),
+                    "swing": swing if swing is not None else drum_settings.get("swing", 0.0),
+                }
+                st.rerun()
+
+    if removal_ids:
+        st.session_state["piano_roll_tracks"] = [
+            t for t in tracks if t["id"] not in removal_ids
+        ]
+        tracks = _tracks_state()
+
+    if duplicate_payloads:
+        _tracks_state().extend(duplicate_payloads)
+        tracks = _tracks_state()
+    if duplicate_shift_payloads:
+        _tracks_state().extend(duplicate_shift_payloads)
+        tracks = _tracks_state()
 
     tracks_for_render = copy.deepcopy(tracks)
     for t in tracks_for_render:
