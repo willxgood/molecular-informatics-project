@@ -74,7 +74,7 @@ def _group_payload(
     payload: List[dict] = []
     palette_len = len(PALETTE)
     for idx, match in enumerate(matches):
-        if not match.present or not match.atom_matches:
+        if not match.present:
             continue
         freq = audio_utils.map_wavenumber_to_audible(
             match.group.center_wavenumber, audible_range=audible_range
@@ -85,8 +85,8 @@ def _group_payload(
             )
         wavenumber = float(match.group.center_wavenumber)
         color = PALETTE[idx % palette_len]
-        # Flatten atom hits for drawing
-        atom_ids = sorted({atom for hit in match.atom_matches for atom in hit})
+        # Flatten atom hits for drawing (may be empty if not returned)
+        atom_ids = sorted({atom for hit in match.atom_matches for atom in hit}) if match.atom_matches else []
         payload.append(
             {
                 "name": match.group.name,
@@ -192,7 +192,7 @@ def render_molecule_visualizer(
           ctx.font = "12px Inter, -apple-system, BlinkMacSystemFont, sans-serif";
           ctx.fillStyle = "#e5e7eb";
           let y = canvas.height - 14;
-          for (const group of payload.groups.slice(0, 6)) {{
+          for (const group of payload.groups) {{
             ctx.fillStyle = group.color;
             ctx.fillRect(16, y - 9, 10, 10);
             ctx.fillStyle = "#e5e7eb";

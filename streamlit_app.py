@@ -4,6 +4,9 @@ from __future__ import annotations
 import json
 from typing import Dict, List, Optional
 
+import numpy as np
+from rdkit import Chem
+
 import pandas as pd
 import streamlit as st
 
@@ -66,6 +69,26 @@ def _remember_smiles(smiles: str):
     del history[HISTORY_LIMIT:]
 
 
+@st.cache_data(show_spinner=False)
+def _cached_matches(smiles: str) -> List[chem_utils.FunctionalGroupMatch]:
+    """Cache functional group detection by canonical SMILES to reduce lag."""
+
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return []
+    return chem_utils.find_functional_groups(mol)
+
+
+@st.cache_data(show_spinner=False)
+def _cached_molecule_image(smiles: str, size: int = 300):
+    """Cache molecule image rendering by SMILES."""
+
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return None
+    return chem_utils.get_molecule_image(mol, size=size)
+
+
 def _set_ketcher_value(smiles: str):
     smiles = smiles.strip()
     current = st.session_state.get("ketcher_value", "")
@@ -123,7 +146,8 @@ def render_molecule_info(info: chem_utils.MoleculeInfo):
     st.subheader("Molecule overview")
     cols = st.columns([1, 2])
     with cols[0]:
-        st.image(chem_utils.get_molecule_image(info.mol, size=300), caption=info.smiles)
+        cached_img = _cached_molecule_image(info.smiles, size=300)
+        st.image(cached_img if cached_img is not None else chem_utils.get_molecule_image(info.mol, size=300), caption=info.smiles)
     with cols[1]:
         st.markdown(
             f"**Canonical SMILES:** `{info.smiles}`\n\n"
@@ -163,6 +187,7 @@ def render_audio_section(
     sample_rate: int,
     heading: str = "Molecular soundscape",
     mapping_config: Optional[Dict[str, object]] = None,
+    info: Optional[chem_utils.MoleculeInfo] = None,
 ):
     st.subheader(heading)
     mapping_config = mapping_config or {
@@ -211,33 +236,60 @@ def render_audio_section(
             "Audio frequency (Hz)": [f"{freq:.1f}" for freq in display_frequencies],
         }
     )
-    st.dataframe(freq_table, hide_index=True)
-    with st.expander("How are FTIR wavenumbers mapped to audio?"):
-        aud_min, aud_max = mapping_config["audible_range"]  # type: ignore[index]
-        wrap_note = (
-            f"wrapped into {mapping_config.get('wrap_band', (110.0, 880.0))[0]:.0f}–"
-            f"{mapping_config.get('wrap_band', (110.0, 880.0))[1]:.0f} Hz for a smoother band."
-            if mapping_config.get("wrap", False)
-            else "unwrapped to preserve spacing."
-        )
-        st.markdown(
-            f"- Current mode: {mapping_config.get('label', 'Wide')} — map 400–4000 cm⁻¹ linearly to"
-            f" {aud_min:.0f}–{aud_max:.0f} Hz, {wrap_note}\n"
-            "- A physical conversion (`ν = wavenumber × c`) would land in the 10¹³–10¹⁴ Hz infrared range, far above hearing; raw use would alias. The mapping is intentionally musical/educational."
-        )
+
+    vis_col1, vis_col2, vis_col3 = st.columns([1, 1.2, 1.2])
+    with vis_col1:
+        if info is not None:
+            st.image(chem_utils.get_molecule_image(info.mol, size=260), caption=info.smiles)
+    with vis_col2:
+        st.dataframe(freq_table, hide_index=True)
+        st.caption("Detected groups mapped into the audible band.")
+    with vis_col3:
+        with st.expander("How are FTIR wavenumbers mapped to audio?"):
+            aud_min, aud_max = mapping_config["audible_range"]  # type: ignore[index]
+            wrap_note = (
+                f"wrapped into {mapping_config.get('wrap_band', (110.0, 880.0))[0]:.0f}–"
+                f"{mapping_config.get('wrap_band', (110.0, 880.0))[1]:.0f} Hz for a smoother band."
+                if mapping_config.get("wrap", False)
+                else "unwrapped to preserve spacing."
+            )
+            st.markdown(
+                f"- Mode: {mapping_config.get('label', 'Wide')} — map 400–4000 cm⁻¹ linearly to"
+                f" {aud_min:.0f}–{aud_max:.0f} Hz, {wrap_note}\n"
+                "- Physical ν=c·wavenumber lands in the infrared; mapping is intentionally musical."
+            )
 
     waveform = audio_utils.generate_waveform(
         components, duration=duration, sample_rate=sample_rate
     )
     audio_bytes = audio_utils.waveform_to_wav_bytes(waveform, sample_rate=sample_rate)
     download_key = f"download_{heading.replace(' ', '_').lower()}"
-    st.download_button(
-        "Download WAV",
-        data=audio_bytes,
-        file_name="molecule.wav",
-        mime="audio/wav",
-        key=download_key,
-    )
+    player_col, wave_col = st.columns([1, 1])
+    with player_col:
+        st.audio(audio_bytes, format="audio/wav")
+        st.download_button(
+            "Download WAV",
+            data=audio_bytes,
+            file_name="molecule.wav",
+            mime="audio/wav",
+            key=download_key,
+        )
+    with wave_col:
+        try:
+            import plotly.graph_objects as go
+
+            # Downsample for plotting
+            if len(waveform) > 4000:
+                factor = max(1, len(waveform) // 4000)
+                wf_plot = waveform[::factor]
+            else:
+                wf_plot = waveform
+            x_axis = np.linspace(0, duration, num=len(wf_plot))
+            fig = go.Figure(go.Scatter(x=x_axis, y=wf_plot, mode="lines", line=dict(color="#2a9d8f")))
+            fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), height=180, showlegend=False)
+            st.plotly_chart(fig, config={"responsive": True})
+        except Exception:
+            st.caption("Install `plotly` for waveform preview.")
     st.caption(
         "Add or remove functional groups to reshape the sonic palette."
         " Playback is consolidated in the piano roll – add the molecule clip there to hear it."
@@ -327,7 +379,7 @@ def main():
 
     _remember_smiles(info.smiles)
 
-    matches = chem_utils.find_functional_groups(info.mol)
+    matches = _cached_matches(info.smiles) or chem_utils.find_functional_groups(info.mol)
 
     overview_tab, ftir_tab, sound_tab, arrange_tab = st.tabs(
         ["Overview", "FTIR features", "Soundscape", "Arrange"]
@@ -346,6 +398,7 @@ def main():
             duration,
             sample_rate,
             mapping_config=mapping_config,
+            info=info,
         )
 
     with arrange_tab:

@@ -138,7 +138,7 @@ def _synth_drum_loop(
     snare_level: float = 1.0,
     hat_level: float = 1.0,
     humanize_ms: float = 0.0,
-    master_gain: float = 1.0,
+    master_gain: float = 0.9,
 ) -> Dict[str, Any]:
     """Generate a lightweight synthetic drum loop (kick/snare/hat) with swing applied."""
 
@@ -163,22 +163,22 @@ def _synth_drum_loop(
         if start_idx >= total_samples:
             return
         if shape == "kick":
-            length = int(0.3 * sample_rate)
-            t = np.linspace(0, 0.3, length, endpoint=False)
-            env = np.exp(-t * 9.0)
-            sig = np.sin(2 * np.pi * 60.0 * t) * env * float(kick_level)
+            length = int(0.35 * sample_rate)
+            t = np.linspace(0, 0.35, length, endpoint=False)
+            env = np.exp(-t * 6.5)
+            sig = np.sin(2 * np.pi * 52.0 * t) * env * float(kick_level)
         elif shape == "snare":
             length = int(0.22 * sample_rate)
             t = np.linspace(0, 0.22, length, endpoint=False)
             env = np.exp(-t * 12.0)
             noise = np.random.uniform(-1.0, 1.0, size=length) * env
-            sig = noise * 0.65 * float(snare_level)
+            sig = noise * 0.5 * float(snare_level)
         else:  # hat
             length = int(0.1 * sample_rate)
             t = np.linspace(0, 0.1, length, endpoint=False)
-            env = np.exp(-t * 18.0)
+            env = np.exp(-t * 16.0)
             noise = np.random.uniform(-1.0, 1.0, size=length) * env
-            sig = noise * 0.38 * float(hat_level)
+            sig = noise * 0.28 * float(hat_level)
 
         # Trim if start is near the end to avoid zero-length slices
         sig_len = len(sig)
@@ -230,6 +230,11 @@ def _synth_drum_loop(
             "kicks": [0.0, 1.5, 2.0, 3.25],
             "snares": [1.5, 3.0],
             "hats": [i * 0.25 for i in range(16)],
+        },
+        "ambient": {
+            "kicks": [0.0],
+            "snares": [],
+            "hats": [0.0, 1.5, 3.0],
         },
     }
 
@@ -487,6 +492,20 @@ def _render_track_editor(
         arrange_tab, synth_tab, effects_tab = st.tabs(["Arrange", "Synth", "Effects"])
 
         with arrange_tab:
+            nudge_cols = st.columns(4)
+            step_seconds = max(0.01, bar_length * grid_step_bars if bar_length and grid_step_bars else 0.1)
+            if nudge_cols[0].button("← Nudge", key=f"track_nudge_back_{track['id']}"):
+                track["start_time"] = max(0.0, float(track.get("start_time", 0.0) or 0.0) - step_seconds)
+                st.rerun()
+            if nudge_cols[1].button("Nudge →", key=f"track_nudge_forward_{track['id']}"):
+                track["start_time"] = max(0.0, float(track.get("start_time", 0.0) or 0.0) + step_seconds)
+                st.rerun()
+            if nudge_cols[2].button("Shorten", key=f"track_shorten_{track['id']}"):
+                track["duration"] = max(0.1, float(track.get("duration", 1.0) or 1.0) - step_seconds)
+                st.rerun()
+            if nudge_cols[3].button("Lengthen", key=f"track_lengthen_{track['id']}"):
+                track["duration"] = max(0.1, float(track.get("duration", 1.0) or 1.0) + step_seconds)
+                st.rerun()
             if bar_count > 1 and bar_length > 0:
                 start_bar_pos = float(
                     st.slider(
@@ -585,10 +604,14 @@ def _render_track_editor(
                     f"Drum pattern: {ds.get('pattern', 'basic')} · {ds.get('loop_bars', 1)} bars · gain {ds.get('master_gain',1.0):.1f}"
                 )
                 col_d1, col_d2 = st.columns(2)
+                pattern_options = ["ambient", "basic", "four_on_floor", "halftime", "syncopated", "two_step", "trap"]
+                current_pattern = ds.get("pattern", "ambient")
+                if current_pattern not in pattern_options:
+                    current_pattern = "ambient"
                 pattern = col_d1.selectbox(
                     "Pattern",
-                    options=["basic", "four_on_floor", "halftime", "syncopated", "two_step", "trap"],
-                    index=["basic", "four_on_floor", "halftime", "syncopated", "two_step", "trap"].index(ds.get("pattern", "basic")),
+                    options=pattern_options,
+                    index=pattern_options.index(current_pattern),
                     key=f"drum_pat_{track['id']}",
                 )
                 loop_bars = col_d2.selectbox(
@@ -601,7 +624,8 @@ def _render_track_editor(
                 kick_level = mix_cols[0].slider("Kick", 0.2, 1.5, float(ds.get("kick_level", 1.0)), 0.05, key=f"drum_kick_{track['id']}")
                 snare_level = mix_cols[1].slider("Snare", 0.2, 1.5, float(ds.get("snare_level", 1.0)), 0.05, key=f"drum_snare_{track['id']}")
                 hat_level = mix_cols[2].slider("Hat", 0.2, 1.5, float(ds.get("hat_level", 1.0)), 0.05, key=f"drum_hat_{track['id']}")
-                master_gain = mix_cols[3].slider("Gain", 0.5, 2.0, float(ds.get("master_gain", 1.3)), 0.05, key=f"drum_gain_{track['id']}")
+                default_gain = float(ds.get("master_gain", 0.9 if current_pattern == "ambient" else 1.1))
+                master_gain = mix_cols[3].slider("Gain", 0.5, 2.0, default_gain, 0.05, key=f"drum_gain_{track['id']}")
                 humanize_ms = st.slider(
                     "Humanize timing (ms)",
                     min_value=0.0,
@@ -1235,6 +1259,7 @@ def render_piano_roll_section(
         f"Swing {swing*100:.0f}% applied to grid; starts quantize to {float(grid_step_bars)} bar steps with swing timing."
     )
 
+    st.markdown("### Clips & sources")
     add_cols = st.columns([2, 1, 2, 1])
     with add_cols[0]:
         st.markdown(
@@ -1258,10 +1283,12 @@ def render_piano_roll_section(
             index=[1, 2, 4].index(2),
             key="drum_loop_bars",
         )
+        pattern_options = ["ambient", "basic", "four_on_floor", "halftime", "syncopated", "two_step", "trap"]
         pattern = drum_cols[1].selectbox(
             "Pattern",
-            options=["basic", "four_on_floor", "halftime", "syncopated", "two_step", "trap"],
+            options=pattern_options,
             format_func=lambda p: {
+                "ambient": "Ambient sparse",
                 "basic": "Backbeat",
                 "four_on_floor": "Four on the floor",
                 "halftime": "Halftime",
@@ -1275,7 +1302,8 @@ def render_piano_roll_section(
         kick_level = mix_cols[0].slider("Kick", 0.2, 1.5, 1.0, 0.05, key="drum_kick_level")
         snare_level = mix_cols[1].slider("Snare", 0.2, 1.5, 1.0, 0.05, key="drum_snare_level")
         hat_level = mix_cols[2].slider("Hat", 0.2, 1.5, 1.0, 0.05, key="drum_hat_level")
-        drum_gain = mix_cols[3].slider("Drum gain", 0.5, 2.0, 1.3, 0.05, key="drum_gain")
+        default_gain = 0.9 if pattern == "ambient" else 1.1
+        drum_gain = mix_cols[3].slider("Drum gain", 0.5, 2.0, default_gain, 0.05, key="drum_gain")
         humanize_ms = st.slider(
             "Humanize timing (ms)",
             min_value=0.0,
@@ -1553,7 +1581,7 @@ def render_piano_roll_section(
         grid_step=float(grid_step_seconds) if grid_step_seconds else None,
     )
     if figure is not None:
-        st.plotly_chart(figure, use_container_width=True)
+        st.plotly_chart(figure, config={"responsive": True})
     else:
         st.info(
             "Install `plotly` to visualise clips on the piano roll grid, or use"
