@@ -23,6 +23,11 @@ def render_sidebar():
     sample_rate = st.sidebar.select_slider(
         "Sample rate", options=[22050, 32000, 44100], value=44100
     )
+    weight_intensity = st.sidebar.checkbox(
+        "Weight by FTIR intensity",
+        value=False,
+        help="Include qualitative band intensity (strong/medium/weak) in amplitude weighting.",
+    )
     mapping_mode = st.sidebar.selectbox(
         "Audio mapping",
         options=["Wide (unwrapped, 100–4000 Hz)", "Musical (wrapped midrange)"],
@@ -34,6 +39,7 @@ def render_sidebar():
             "wrap": False,
             "wrap_band": (110.0, 880.0),
             "label": "Wide",
+            "weight_intensity": weight_intensity,
         }
     else:
         mapping_config = {
@@ -41,6 +47,7 @@ def render_sidebar():
             "wrap": True,
             "wrap_band": (110.0, 880.0),
             "label": "Musical",
+            "weight_intensity": weight_intensity,
         }
     return {
         "duration": duration,
@@ -202,6 +209,7 @@ def render_audio_section(
         audible_range=mapping_config["audible_range"],  # type: ignore[arg-type]
         wrap=bool(mapping_config.get("wrap", False)),
         wrap_band=mapping_config.get("wrap_band", (110.0, 880.0)),  # type: ignore[arg-type]
+        use_intensity=bool(mapping_config.get("weight_intensity", False)),
     )
     if not components:
         st.info("No functional groups detected for audio synthesis.")
@@ -399,6 +407,7 @@ def main():
             sample_rate,
             mapping_config=mapping_config,
             info=info,
+            # Use intensity weighting toggle to compute amplitudes
         )
 
     with arrange_tab:

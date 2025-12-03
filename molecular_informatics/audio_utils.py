@@ -271,8 +271,21 @@ def groups_to_audio_components(
     audible_range: Tuple[float, float] = (100.0, 4000.0),
     wrap: bool = False,
     wrap_band: Tuple[float, float] = (110.0, 880.0),
+    use_intensity: bool = False,
 ) -> List[AudioComponent]:
     """Convert functional group matches to (frequency, amplitude) components."""
+
+    def _intensity_factor(intensity: str) -> float:
+        """Map qualitative intensity to a multiplier."""
+
+        label = (intensity or "").lower()
+        if "strong" in label:
+            return 1.0
+        if "medium" in label:
+            return 0.6
+        if "weak" in label:
+            return 0.35
+        return 0.5
 
     components: List[AudioComponent] = []
     filtered = [m for m in matches if getattr(m, "present", False)]
@@ -285,7 +298,10 @@ def groups_to_audio_components(
         audio_freq = map_wavenumber_to_audible(center, audible_range=audible_range)
         if wrap:
             audio_freq = _wrap_frequency_to_band(audio_freq, low=wrap_band[0], high=wrap_band[1])
-        weight = match.match_count / total_occurrences if total_occurrences else 0.0
+        raw = match.match_count
+        if use_intensity:
+            raw *= _intensity_factor(getattr(match.group, "intensity", ""))
+        weight = raw / total_occurrences if total_occurrences else 0.0
         components.append((audio_freq, weight))
 
     smoothed = _combine_nearby_components(components)

@@ -94,12 +94,18 @@ def _add_molecule_track(
     duration: float,
     smiles: str,
     matches: Optional[List[chem_utils.FunctionalGroupMatch]] = None,
+    use_intensity: bool = False,
 ):
     track = _default_track_payload(name=name, duration=duration, components=components)
     track["smiles"] = smiles
+    track["use_intensity"] = use_intensity
     if matches:
         track["match_payload"] = [
-            {"wn": float(m.group.center_wavenumber), "count": int(m.match_count)}
+            {
+                "wn": float(m.group.center_wavenumber),
+                "count": int(m.match_count),
+                "intensity": m.group.intensity,
+            }
             for m in matches
             if m.present
         ]
@@ -1274,6 +1280,7 @@ def render_piano_roll_section(
                 duration=duration,
                 smiles=info.smiles,
                 matches=matches,
+                use_intensity=bool(mapping_config.get("weight_intensity", False)),
             )
     with add_cols[2]:
         drum_cols = st.columns([1, 1])
@@ -1371,18 +1378,38 @@ def render_piano_roll_section(
         payload = track.get("match_payload")
         if not payload:
             return
-        total = sum(item.get("count", 0) for item in payload) or 1
+        use_intensity = bool(track.get("use_intensity", False))
+        def _intensity_factor(intensity: str) -> float:
+            label = (intensity or "").lower()
+            if "strong" in label:
+                return 1.0
+            if "medium" in label:
+                return 0.6
+            if "weak" in label:
+                return 0.35
+            return 0.5
+
+        totals = []
+        for item in payload:
+            base = float(item.get("count", 0.0))
+            if use_intensity:
+                base *= _intensity_factor(str(item.get("intensity", "")))
+            totals.append(base)
+        total = sum(totals) or 1
+
         audible_range = mapping_config.get("audible_range", (100.0, 4000.0)) if mapping_config else (100.0, 4000.0)
         wrap = bool(mapping_config.get("wrap", False)) if mapping_config else False
         wrap_band = mapping_config.get("wrap_band", (110.0, 880.0)) if mapping_config else (110.0, 880.0)
         remapped: List[piano_roll.AudioComponent] = []
-        for item in payload:
+        for idx, item in enumerate(payload):
             wn = float(item.get("wn", 0.0))
-            count = float(item.get("count", 0.0))
+            base = float(item.get("count", 0.0))
+            if use_intensity:
+                base *= _intensity_factor(str(item.get("intensity", "")))
             freq = audio_utils.map_wavenumber_to_audible(wn, audible_range=audible_range)
             if wrap:
                 freq = audio_utils._wrap_frequency_to_band(freq, low=wrap_band[0], high=wrap_band[1])  # type: ignore[attr-defined]
-            remapped.append((freq, count / total))
+            remapped.append((freq, base / total))
         track["components"] = remapped
 
     for track in tracks:
